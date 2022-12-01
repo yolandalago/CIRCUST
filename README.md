@@ -17,8 +17,7 @@ INPUTS, see CIRCUST paper for details:
 
 0. Preparatory work
 When you use our tool, you should source R source functions and install some R packages detailed. Run in the Rscrip:
-
-source("functionGTEX_cores.R")
+  source("functionGTEX_cores.R")
 
 1. Preprocessing
 Run the code line under this name in runCIRCURST.R to clean and normalize the data.
