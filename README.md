@@ -15,20 +15,20 @@ INPUTS, see CIRCUST paper for details:
   - Name tissue (nameTissue).
   - Core clock gene names (coreG).
 
-0. Preparatory work
+0. Preparatory work.
 When you use our tool, you should source R source functions and install some R packages detailed. Run in the Rscrip:
   source("functionGTEX_cores.R")
 
-1. Preprocessing
+1. Preprocessing.
 Run the code line under this name in runCIRCURST.R to clean and normalize the data.
 
-2. Preliminary order
+2. Preliminary order.
 Run the code lines under this name in runCIRCURST.R to obtain a preliminary order based on the core clok gene
 
-3. TOP Rhythmic orderings
+3. TOP Rhythmic orderings.
 Run the code lines under this name in runCIRCURST.R to derive the tissue-specific TOP gene list and K circular orders based on K random selections. 
 
-4. Robust Estimation
+4. Robust Estimation.
 Run the code lines under this name in runCIRCURST.R to compute FMM predictions as functions of K circular ordering for the TOP genes. 
 
 OUTPUT:
