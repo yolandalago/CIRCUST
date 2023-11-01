@@ -5,7 +5,7 @@ require("FMM.R")
 source("upDownUp_NP_Code_modif.R")
 source("upDownUp_NP_Code_NoParalelizado.R")
 source("upDownUp_NP_Code_Paralelizado.R")
-source("NucleoComun.R)
+source("NucleoComun.R")
 
 #datos<-mFullNormRefG[[numTissue]]
 
