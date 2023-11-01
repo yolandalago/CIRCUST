@@ -10,7 +10,7 @@ source("functionGTEX_cores.R")
 ##############################################################
 
 # Load data example: Tissue-specific gene expression data from GTEx (dowloaded from:)
-load(matrixIn.RData) # Provided in this GitHub
+load("matrixIn.RData") # Provided in this GitHub
 
 # Expression matrix
 inputExample<-matrixIn 
@@ -40,6 +40,12 @@ preOrdRefG2<-basicPreOder_cores(giveMatIniRefG,nameTissue,coreG)
 # (2.2) & (2.3)
 basicOrdRefG2<-basicOder_cores(nameTissue,preOrdRefG2,coreG)
 	
+##############################################################
+# NOTE: basicOrdRefG2[[2]] CIRCUST estimates for the 		 #
+# circadian phase time for each sample 				 #
+##############################################################
+
+
 ##############################################################
 #		3.-	TOP Rhythmic Orderings   	      	 #
 ##############################################################
