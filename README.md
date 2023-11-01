@@ -23,7 +23,7 @@ When you use our tool, you should source R source functions and install some R p
 Run the code line under this name in runCIRCURST.R to clean and normalize the data.
 
 2. Preliminary order.
-Run the code lines under this name in runCIRCURST.R to obtain a preliminary order based on the core clok gene
+Run the code lines under this name in runCIRCURST.R to obtain a preliminary order based on the core clok gene. Note that the second element of the list obtained as output from basicOder_cores function provides CIRCUST estimates for the circadian phase time for each sample. In the code we usually refer to these values using the term "esc".
 
 3. TOP Rhythmic orderings.
 Run the code lines under this name in runCIRCURST.R to derive the tissue-specific TOP gene list and K circular orders based on K random selections. 
