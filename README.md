@@ -3,11 +3,11 @@ CIRCular robUST statistical methodology to analyse human molecular rhythms from 
 
 # How to use 
 CIRCUST is achieved in R and is easy to use. 
-The code provided in this GitHub replicated the four steps described in CIRCUST paper (url).
+The code provided in this GitHub replicated the four steps described in CIRCUST paper (https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011510).
 
 Run the R script named runCIRCURST.R to ,conduct the methodology.
 The file matrixIn.RData is loaded on the R script and serves as example of unorderd post-mortem gene expression matrix.
-matrixIn: gene expression matrix of size 56200X479 (genes X unordered samples/individuals) at a given tissue.
+matrixIn: gene expression matrix of size 56200X479 (genes X unordered samples/individuals) at a given tissue. Note that it is a real example, so it requires a reasonable amount of computational time.
 
 INPUTS, see CIRCUST paper for details: 
   - Expression matrix (matrixIn).
