@@ -39,7 +39,7 @@
     {\scshape\Large Facultad de Ciencias\par}
     \vspace{2cm}
 
-    {\huge\bfseries Mejora de la Ordenación Circular y Robustez en Transcriptómica Circadiana mediante Métodos basados en CPCA\par}
+    {\huge\bfseries Extensión y optimización del procedimiento CIRCUST de reconstrucción temporal\par}
     \vspace{1.5cm}
 
     {\Large \textit{Trabajo de Fin de Grado en Estadística}\par}
@@ -107,134 +107,116 @@ This project presents a modular and efficient re-implementation of CIRCUST in Py
 
 \chapter{Introducción}
 
-\section{Sistema circadiano: función, organización y relevancia}
+\section{El sistema circadiano: ritmos, reloj molecular y genes circadianos}
 
-Los ritmos circadianos (del latín \textit{circa diem}, ``alrededor de un día'') son oscilaciones biológicas endógenas con un periodo aproximado de 24 horas. Están presentes en la práctica totalidad de los organismos, desde cianobacterias hasta seres humanos, y regulan procesos fisiológicos, metabólicos y conductuales. La Figura~\ref{fig:oscilacion} ilustra la forma típica de uno de estos ritmos a lo largo del día.
+Los ritmos circadianos subyacen a una gran variedad de procesos biológicos en prácticamente todos los organismos vivos, desde cianobacterias hasta seres humanos \cite{bell-pedersen2005}. Estos ritmos se manifiestan en distintos niveles de organización biológica, incluyendo procesos fisiológicos (como la temperatura corporal o el ritmo cardíaco), hormonales (como la secreción de cortisol y melatonina) y moleculares (como la expresión génica). Sincronizados principalmente por el ciclo diario de luz y oscuridad, los ritmos circadianos desempeñan un papel fundamental en la regulación y coordinación temporal de procesos fisiológicos, metabólicos y conductuales a lo largo de las 24 horas del día \cite{takahashi2017, halberg1969, mohawk2012, mure2018}.
 
 \begin{figure}[htbp]
 \centering
+\pgfmathsetseed{42}
 \begin{tikzpicture}
 \begin{axis}[
     width=0.85\textwidth, height=5cm,
     xlabel={Hora del día}, ylabel={Nivel de expresión},
-    xmin=0, xmax=24, ymin=-1.6, ymax=1.8,
+    xmin=0, xmax=24, ymin=-1.6, ymax=2.0,
     xtick={0,6,12,18,24},
     ytick=\empty,
     axis lines=left,
-    domain=0:24, samples=200,
     clip=false,
 ]
-\addplot[thick, blue]{cos(360*(x-14)/24)};
-\draw[dashed, gray] (axis cs:14,-1.6) -- (axis cs:14,1);
-\node at (axis cs:14,1) [above, yshift=2pt, font=\small] {Pico (máxima expresión)};
-\node at (axis cs:4.8,-0.9) [below, yshift=-2pt, font=\small] {Valle (mínima expresión)};
+% Nube de observaciones: curva subyacente + ruido
+\addplot[only marks, mark=*, mark size=1.1pt, gray!70, domain=0:24, samples=44]
+    {cos(360*(x-14)/24) + 0.35*cos(2*360*(x-14)/24) + 0.20*rand};
+% Ritmo subyacente (asimétrico: pico agudo, valle ancho)
+\addplot[thick, blue, domain=0:24, samples=200]
+    {cos(360*(x-14)/24) + 0.35*cos(2*360*(x-14)/24)};
+\draw[dashed, gray] (axis cs:14,-1.6) -- (axis cs:14,1.35);
+\node at (axis cs:14,1.35) [above, yshift=2pt, font=\small] {Pico (máxima expresión)};
+\node at (axis cs:5,-0.65) [below, yshift=-2pt, font=\small] {Valle (mínima expresión)};
 \end{axis}
 \end{tikzpicture}
-\caption[Patrón rítmico de un gen circadiano en 24 horas.]{Patrón rítmico de un gen circadiano a lo largo de 24 horas. El pico marca la máxima expresión y define la fase del ritmo.}
+\caption[Esquematización del ritmo circadiano subyacente en datos de expresión de un gen circadiano en 24 horas.]{Esquematización del ritmo circadiano subyacente en datos de expresión de un gen circadiano en 24 horas. Los puntos representan las observaciones de expresión y la curva el ritmo subyacente. El pico marca el instante de máxima expresión y se relaciona con el momento del día en que el gen realiza su función biológica.}
 \label{fig:oscilacion}
 \end{figure}
 
-A nivel molecular, el reloj circadiano es un mecanismo genético bien caracterizado. Su funcionamiento se basa en un bucle de retroalimentación: un grupo de genes activa la producción de unas proteínas que, al acumularse, bloquean a los genes que las habían activado; cuando esas proteínas se degradan, el bloqueo desaparece y el ciclo vuelve a empezar. Este mecanismo se conoce como bucle de retroalimentación transcripcional-traduccional (TTFL, por sus siglas en inglés), y los genes que lo forman constituyen el denominado \textit{core clock}. En los mamíferos, los reguladores positivos (los factores de transcripción CLOCK y BMAL1) activan la expresión de los reguladores negativos (las familias de proteínas Period, PER, y Cryptochrome, CRY), que a su vez inhiben a los primeros \cite{takahashi2017}. Completar este ciclo de activación e inhibición tarda aproximadamente 24 horas, lo que fija el ritmo basal de la célula.
-
-El sistema está organizado de forma jerárquica (Figura~\ref{fig:jerarquia}). Un reloj central, situado en el núcleo supraquiasmático del hipotálamo \cite{klein1991}, recibe información lumínica desde la retina y la utiliza para sincronizarse con el ciclo externo de luz y oscuridad. Este reloj central coordina, mediante señales nerviosas y hormonales, los relojes periféricos presentes en la mayoría de órganos y tejidos (corazón, hígado, pulmones o tejido adiposo), de modo que sus ritmos se mantienen alineados entre sí y con el entorno.
+En mamíferos, la organización del sistema circadiano es jerárquica \cite{gomezabellan2012}: un oscilador central, conocido como reloj circadiano central y localizado en el núcleo supraquiasmático del hipotálamo \cite{klein1991}, recibe información lumínica desde la retina y la utiliza para sincronizarse con el ciclo externo de luz y oscuridad. Este reloj actúa como marcapasos y coordina osciladores periféricos presentes en órganos y tejidos. La correcta sincronización entre estos relojes resulta esencial para mantener la coordinación temporal de los procesos fisiológicos y metabólicos del organismo, así como su adecuada adaptación a las condiciones ambientales. La Figura~\ref{fig:jerarquia} muestra una esquematización de dicha estructura jerárquica.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[
-    >=Stealth,
-    node distance=1.0cm and 0.6cm,
-    box/.style={draw, rounded corners, minimum width=1.9cm, minimum height=0.8cm, align=center, font=\small},
-    organ/.style={draw, rounded corners, minimum width=1.7cm, minimum height=0.7cm, align=center, font=\small, fill=gray!8},
-]
-\node[box] (luz) {Luz};
-\node[box, right=of luz] (retina) {Retina};
-\node[box, right=of retina, fill=blue!10] (nsq) {Reloj central\\(NSQ)};
-\draw[->] (luz) -- (retina);
-\draw[->] (retina) -- (nsq);
-
-\node[organ, below=1.5cm of nsq, xshift=-3.6cm] (corazon) {Corazón};
-\node[organ, right=of corazon] (higado) {Hígado};
-\node[organ, right=of higado] (pulmon) {Pulmones};
-\node[organ, right=of pulmon] (adiposo) {T. adiposo};
-
-\draw[->] (nsq) -- (corazon);
-\draw[->] (nsq) -- (higado);
-\draw[->] (nsq) -- (pulmon);
-\draw[->] (nsq) -- (adiposo);
-\end{tikzpicture}
-\caption[Organización jerárquica del sistema circadiano.]{Organización jerárquica del sistema circadiano: el reloj central (NSQ) se sincroniza con la luz a través de la retina y coordina los relojes periféricos.}
+\includegraphics[width=0.85\textwidth]{images/imagenEsquematicaRelojCentral.pdf}
+\caption[Organización jerárquica del sistema circadiano.]{Esquematización de la organización jerárquica del sistema circadiano: el reloj central (NSQ) se sincroniza con la luz a través de la retina, así como con los relojes periféricos de los distintos órganos o tejidos.}
 \label{fig:jerarquia}
 \end{figure}
 
-Como consecuencia de esta regulación, numerosos procesos biológicos quedan bajo control circadiano y muestran patrones oscilatorios a lo largo de las 24 horas del día. Es el caso de la temperatura corporal, la presión arterial o los niveles de hormonas como el cortisol y la melatonina, cuyos valores varían de forma predecible según la hora \cite{czeisler1999, roenneberg2016}.
+Esta arquitectura jerárquica da lugar a patrones de expresión génica rítmica específicos de cada tejido. Denominaremos genes circadianos a aquellos cuya expresión presenta oscilaciones con un periodo aproximado de 24 horas en un tejido determinado (véase Figura~\ref{fig:oscilacion}). Estos genes desempeñan un papel fundamental en la regulación temporal de procesos celulares y fisiológicos, favoreciendo que las distintas funciones biológicas se ejecuten de forma coordinada a lo largo del día. En particular, el instante de máxima expresión génica (pico de expresión) se encuentra estrechamente relacionado con el momento del día en que el gen ejerce su función biológica principal \cite{ruan2021, bahammam2023}.
 
-A nivel transcriptómico, las tecnologías de secuenciación de alto rendimiento han mostrado que una proporción elevada del genoma (hasta un 40--50\,\% según el tejido) está bajo control circadiano \cite{zhang2014, hughes2009}, de modo que la actividad de las células cambia de forma sustancial con la hora del día.
+En el contexto de la biología circadiana humana, ámbito en el que se centra este trabajo, la relevancia biomédica de estos ritmos ha sido ampliamente documentada, existiendo evidencia de variaciones temporales en resultados clínicos y en la respuesta a distintas intervenciones terapéuticas, como la cirugía cardíaca, la quimioterapia o la respuesta inmune \cite{fudulu2021, marcu2024, ince2023}. En contraposición, se ha evidenciado que la desalineación crónica del reloj circadiano, asociada al trabajo por turnos (\textit{shift work}), al \textit{jet lag} social o a la exposición nocturna a luz artificial, constituye un factor de riesgo para trastornos metabólicos (diabetes tipo 2, obesidad), enfermedades cardiovasculares, trastornos neurodegenerativos y diversos tipos de cáncer \cite{sulli2018, sahar2009}.
 
-Por este motivo, identificar los genes circadianos tiene un interés directo: son los responsables de coordinar funciones biológicas y de garantizar la sincronización de los procesos del organismo. Además, el instante de máxima expresión de cada gen, \textit{su pico}, señala el momento del día en que se desencadena la función biológica asociada, por lo que conocer esos tiempos permite interpretar cuándo y cómo se activa cada proceso.
+\section{Análisis de genes circadianos humanos: modelos para el análisis de señales oscilatorias}
 
-La relevancia clínica de estos ritmos es doble. Por un lado, la desalineación crónica del reloj circadiano, asociada al trabajo por turnos (\textit{shift work}), al \textit{jet lag} social o a la exposición nocturna a luz artificial, constituye un factor de riesgo para trastornos metabólicos (diabetes tipo 2, obesidad), enfermedades cardiovasculares, trastornos neurodegenerativos y diversos tipos de cáncer \cite{sulli2018,sahar2009}.
-Por otro, dado que miles de genes fluctúan a lo largo del día, la disponibilidad de muchas dianas terapéuticas depende de la hora: la eficacia y la toxicidad de numerosos fármacos varían según el momento de administración, lo que constituye el objeto de la cronofarmacología \cite{antoch2013, hesse2021}.
+La identificación y caracterización de los genes circadianos a partir de modelos para el análisis de señales oscilatorias resulta fundamental en el ámbito de la biología circadiana humana.
 
-\section{Estimación del orden temporal}
+Los modelos más empleados en cronobiología para describir ritmos circadianos son los modelos armónicos sinusoidales, normalmente con un único componente de periodo fijado, por ejemplo 24 horas, entre los que destaca el modelo Cosinor \cite{cosinor}. Este enfoque representa la señal mediante una función sinusoidal, habitualmente con un periodo prefijado, y permite estimar parámetros interpretables como la amplitud, la fase y el nivel medio de expresión. Este tipo de aproximación resulta útil por su sencillez e interpretabilidad, pero puede ser limitada cuando las señales presentan formas asimétricas o patrones de oscilación más complejos.
 
-Para identificar genes rítmicos y caracterizar sus picos es necesario conocer el instante del ciclo en que se obtuvo cada muestra. Cuando esa etiqueta temporal no está disponible, el problema se reformula como la \textbf{estimación del orden temporal} de las muestras, ordenarlas según su posición latente dentro del ciclo de 24 horas a partir únicamente de los datos de expresión. Como el ciclo es periódico (la hora 0 coincide con la 24), ese orden no es lineal sino \textbf{circular}; las muestras se disponen sobre una circunferencia y lo que se estima es su orden circular, es decir, su posición angular relativa, y no un tiempo absoluto. Recuperar después el origen y el sentido de giro, situar el orden estimado sobre el tiempo biológico real, constituye el problema de sincronización, que requiere información adicional, como genes de fase conocida que actúen de ancla. Un ejemplo característico es \textit{ARNTL} (también conocido como \textit{BMAL1}), cuya fase de expresión está bien caracterizada y se sitúa en antifase respecto a la de los genes \textit{PER} y \textit{CRY} \cite{ueda2005}.
+Como alternativa, existen métodos no paramétricos como \textit{RAIN} \cite{rain2014} o \textit{JTK\_CYCLE} \cite{jtkcycle2010}, que permiten identificar patrones rítmicos sin imponer una forma funcional tan rígida. Sin embargo, no siempre proporcionan parámetros directamente interpretables desde el punto de vista biológico, lo que puede dificultar la caracterización posterior de las diferencias entre grupos o regiones.
 
-Los datos de partida se organizan en una matriz de expresión génica en la que las filas corresponden a los genes (del orden de decenas de miles) y las columnas a las muestras, es decir, a los distintos tiempos. Una característica esencial de estos datos es que solo una pequeña fracción de los genes presenta un patrón rítmico claro, la mayoría son poco o nada rítmicos y se comportan como ruido de fondo, lo que dificulta extraer la señal circular.
+En este contexto, destacan los modelos FMM (\textit{Frequency Modulated Möbius}) \cite{fmmAlgorithm}, una familia de modelos paramétricos flexibles que permite representar señales periódicas con formas diversas y, al mismo tiempo, obtener parámetros interpretables. Estos modelos ofrecen una alternativa adecuada para describir curvas de expresión génica cuando la forma de la oscilación no se ajusta necesariamente a una onda sinusoidal simple.
 
-La disponibilidad de etiquetas temporales depende del tipo de estudio. En modelos animales, como el ratón, las muestras se obtienen a tiempos controlados y conocidos, pero a costa de un número reducido de individuos y de tejidos concretos \cite{panda2002}. En humanos, en cambio, los estudios a gran escala recurren a tejido post-mortem, donde la hora de la muerte suele ser desconocida o imprecisa y cada donante aporta una única muestra por tejido. El consorcio \textbf{GTEx} (\textit{Genotype-Tissue Expression}) \cite{gtex2020} constituye la referencia mundial de este tipo de datos, al proporcionar un atlas masivo de expresión génica en múltiples tejidos humanos; es también el escenario en el que se enmarca la metodología empleada en el trabajo de Circust \cite{larriba2023}.
-% [FALTA CITA: añadir artículos previos de los tutores (Larriba/Rueda) sobre orden temporal y cronobiología]
+La identificación y caracterización precisa de genes circadianos, así como de sus relaciones tanto intra- como inter-tisulares, es uno de los retos de la cronobiología, ya que resulta fundamental para comprender la regulación y coordinación de los relojes circadianos entre tejidos humanos y su interacción con el entorno. Esta visión integradora se materializa en los denominados atlas de expresión circadiana, que describen la regulación temporal de la expresión génica a escala del organismo y constituyen un recurso clave para el descubrimiento de biomarcadores temporales y el desarrollo de estrategias terapéuticas \textit{time-aware} \cite{zhang2014, dyar2018, mure2018, ruben2018, wei2022, larriba2023}. Hasta la fecha se dispone de atlas de expresiones circadianas humanas para un número muy reducido de tejidos, generalmente periféricos. Esto ha llevado a recurrir tradicionalmente a estudios en especies homólogas, como ratones o babuinos, donde es posible obtener muestras in vivo. Aunque estos modelos han servido como referencia para guiar la toma de decisiones en humanos, es evidente que pueden introducir sesgos relevantes.
 
-El estudio del orden temporal en humanos presenta varios desafíos específicos:
+\section{Atlas de expresiones circadianas humanas. El problema de estimación del orden temporal}
 
-\begin{enumerate}
-    \item \textbf{Imposibilidad de muestreos seriados.} A diferencia de los modelos animales, obtener biopsias repetidas de tejidos internos a lo largo del día es inviable en humanos. Ello obliga a recurrir a tejidos accesibles, como sangre o piel, o a muestras post-mortem, y limita la extrapolación de los resultados a órganos con una ritmicidad presumiblemente distinta \cite{brown2005}.
-    \item \textbf{Variabilidad biológica y ambiental.} Factores como el trabajo nocturno, la exposición a luz artificial, los horarios irregulares de comida o el estrés desincronizan el ritmo interno de cada individuo. Las diferencias genéticas entre sujetos modifican además la fase y la amplitud de sus ritmos. El resultado es una elevada variabilidad entre muestras que dificulta identificar patrones consistentes \cite{walker2020}.
-    \item \textbf{Incertidumbre en muestras post-mortem.} Además de desconocerse la fase circadiana en el momento del fallecimiento, tras la muerte el ARN se degrada de forma progresiva. Esta degradación altera los niveles de expresión detectados e introduce ruido y sesgos que dificultan distinguir la señal rítmica real \cite{zhu2017}.
-    \item \textbf{Patrones de expresión no sinusoidales.} La expresión de muchos genes circadianos no sigue una onda simétrica, sino formas asimétricas y complejas, lo que complica su modelización, especialmente con datos ruidosos o incompletos \cite{fmmAlgorithm}.
-\end{enumerate}
+Para abordar el problema de la identificación y caracterización de genes circadianos humanos orientado al avance en la construcción de atlas de expresión génica circadiana en humanos, así como al estudio de la interrelación entre tejidos de estos genes, resulta imprescindible disponer de matrices de datos de expresión génica humana a lo largo de las 24 horas en una amplia colección de tejidos y órganos. Sin embargo, la obtención de dichos datos transcriptómicos longitudinales no es viable por razones clínicas y éticas, lo que motiva el uso de datos de expresión \textit{post mortem} en estudios transcriptómicos humanos.
 
-Estos desafíos explican por qué, en la práctica, el escenario habitual en humanos consiste en disponer de expresión post-mortem de varios tejidos de un mismo donante sin una etiqueta temporal fiable. Es precisamente esta situación la que motiva el desarrollo de métodos capaces de estimar el orden temporal a partir de los propios datos de expresión.
+\subsubsection{Limitaciones de los datos de expresión humana}
 
-\section{Métodos actuales de estimación del orden temporal}
+A diferencia de lo que ocurre en estudios experimentales con modelos animales, donde la variable temporal puede observarse de forma controlada mediante muestreos realizados a distintas horas del día, en humanos este tipo de diseño no es viable debido al riesgo que implica la obtención de biopsias seriadas de tejidos internos a lo largo del día. Como consecuencia, el análisis transcriptómico en humanos habitualmente se realiza a partir de estudios transversales con muestras \textit{post mortem}, en las que el tiempo biológico interno de cada individuo no se observa directamente y debe ser inferido a partir de la información disponible.
 
-Se han propuesto distintos métodos para estimar el orden temporal a partir exclusivamente de los datos de expresión. Pueden agruparse en enfoques basados en estadística multivariante y enfoques basados en aprendizaje automático. A continuación se enumeran los más relevantes; el método empleado en este trabajo se desarrolla en detalle en el Capítulo~\ref{cap:metodologia}.
+Como solución aproximada a este problema, algunos estudios proponen el uso de la hora de muerte (\textit{TOD}, del inglés \textit{Time of Death}). Sin embargo, utilizar directamente la hora de fallecimiento podría inducir una ordenación temporal inadecuada de las muestras, puesto que esta hora no tiene por qué coincidir con la fase circadiana real del individuo. Factores como el cronotipo, los hábitos de sueño, la enfermedad, la medicación o las condiciones previas al fallecimiento pueden provocar discrepancias entre el tiempo externo registrado y el estado circadiano interno.
 
-\begin{itemize}
-    \item \textbf{CIRCUST} \cite{larriba2023}: proyecta los genes reloj sobre el círculo unidad mediante Análisis de Componentes Principales Circulares (CPCA) \cite{scholz2007} y ajusta las curvas de expresión con los modelos ORI \cite{larribaORI} y FMM \cite{fmmAlgorithm}, obteniendo un orden temporal interpretable.
-    \item \textbf{CYCLOPS} \cite{CYCLOPS} y su evolución \textbf{CYCLOPS 2.0} \cite{CYCLOPS2}: emplean un autoencoder con un cuello de botella circular para asignar una fase a cada muestra; la versión 2.0 incorpora corrección de covariables.
-    \item \textbf{PENN} \cite{penn2023}: red neuronal que, además de minimizar el error de reconstrucción, impone que la expresión siga una curva periódica al ordenar las muestras por la fase estimada.
-    \item \textbf{CHIRAL} \cite{chiral2020}: método orientado a datos multi-tejido que estima primero una fase por tejido y la integra después en una fase global por donante.
-\end{itemize}
+A esta primera limitación deben añadirse el hecho de que los estudios genómicos muestran una elevada variabilidad técnica, derivada de la degradación del ARN en las muestras biológicas, de errores sistemáticos o aleatorios en los dispositivos de medición y de la heterogeneidad de los protocolos experimentales entre laboratorios.
 
-\subsection{Limitaciones de los métodos actuales}
-\label{subsec:limitaciones}
+Además, al tratarse de datos transversales procedentes de individuos distintos, existe una elevada heterogeneidad biológica y clínica. Variables como la edad, el sexo, la causa de la muerte, el estado clínico o la historia individual de sueño pueden influir en la expresión génica y dificultar la separación entre variabilidad interindividual y variabilidad asociada al momento circadiano.
 
-Ninguno de los métodos disponibles resuelve por completo el problema, y todos presentan compromisos que conviene comparar de forma conjunta. Los enfoques basados en redes neuronales (CYCLOPS y PENN) modelan bien relaciones no lineales, pero funcionan como cajas negras: carecen de una trazabilidad estadística estricta y son propensos al sobreajuste cuando el número de muestras es reducido, una situación habitual en transcriptómica. CHIRAL, por su parte, fue diseñado para infraestructuras multi-tejido masivas y pierde eficacia en estudios de un solo tejido o en cohortes pequeñas, al depender de la jerarquía entre los órganos de un mismo donante para estabilizar la inferencia.
+Por último, los estudios transcriptómicos humanos \textit{post mortem} suelen presentar una cobertura temporal irregular a lo largo del ciclo circadiano, ya que determinadas franjas horarias se encuentran sobrerrepresentadas mientras que otras apenas disponen de muestras \cite{kimura2023, gorczyca2025}. Esta distribución desigual puede comprometer la identificación y el análisis de genes circadianos, especialmente en modelos restrictivos como el Cosinor.
 
-CIRCUST ofrece la ventaja de una base estadística transparente (CPCA y modelo FMM), pero su formulación e implementación actuales presentan tres limitaciones. En primer lugar, es vulnerable a los factores de confusión: asume que toda la varianza cíclica capturada por los primeros componentes principales procede del reloj biológico, sin un mecanismo para filtrar efectos de lote, sexo, edad o patologías. Si estos sesgos no se corrigen, la proyección sobre el círculo queda deformada. En segundo lugar, su precisión decae cuando la distribución temporal de las muestras es muy desigual o presenta grandes huecos (muestreo disperso), un escenario frecuente en cohortes post-mortem. Por último, su implementación original en R es un \textit{script} monolítico, poco modular y difícil de integrar, probar o paralelizar.
+Estas limitaciones han condicionado significativamente los avances en biología circadiana humana. De hecho, gran parte del conocimiento inicial sobre ritmicidad circadiana procede de modelos animales mantenidos bajo condiciones experimentales altamente controladas, que no reproducen la complejidad ni la variabilidad inherentes a la fisiología humana \cite{zhang2014}. También se han desarrollado atlas transcriptómicos en especies filogenéticamente próximas, como el babuino \cite{mure2018}, aunque su reducido tamaño muestral limita la reproducibilidad y generalización de los resultados. Como consecuencia, actualmente no se dispone de conjuntos de referencia de expresión génica circadiana humana suficientemente amplios, lo que dificulta tanto la validación objetiva de nuevas metodologías como la comparación sistemática entre tejidos.
 
-En conjunto, ningún método actual reúne simultáneamente interpretabilidad estadística, robustez frente a covariables y a muestreo disperso además de una arquitectura modular reutilizable, esta carencia motiva el presente trabajo.
+\subsubsection{Atlas de expresión circadiana humana}
+
+Las limitaciones asociadas al acceso a datos de expresión génica humana han ralentizado el desarrollo de estos atlas, ya que requieren una estimación previa del tiempo biológico de las muestras, problema conocido en estadística como estimación del orden temporal.
+
+Los escasos trabajos centrados en humanos se basan principalmente en muestras \textit{post mortem}, en su mayoría procedentes del proyecto GTEx (\textit{Genotype-Tissue Expression}) \cite{gtex2020}, principal referencia para el estudio de la expresión génica en tejidos humanos \textit{post mortem}. Aunque GTEx registra para cada donante una estimación del instante de fallecimiento (\textit{Time of Death}, TOD), esta medida suele ser imprecisa y no refleja necesariamente la fase circadiana interna del individuo.
+
+Los atlas de expresión circadiana humana desarrollados durante la última década se han construido a partir de distintas estrategias de estimación del orden temporal. Entre ellos destacan el atlas de 13 tejidos propuesto por Ruben et al. \cite{ruben2018}, basado en \textit{CYCLOPS} y en información circadiana conservada entre ratón y humano; el atlas de 34 tejidos desarrollado por Larriba et al. \cite{larriba2023}, construido exclusivamente a partir de información transcriptómica humana mediante \textit{CIRCUST}; y el atlas más reciente de Talamanca et al. \cite{talamanca2023}, que amplía el análisis a 54 tejidos mediante el algoritmo bayesiano \textit{CHIRAL}.
+
+En este contexto, la estimación del orden temporal de las muestras constituye un problema central para la construcción de atlas circadianos humanos. Sin embargo, su resolución resulta particularmente compleja debido a la elevada incertidumbre y heterogeneidad inherentes a los datos transcriptómicos \textit{post mortem}, pudiendo una estimación incorrecta del mismo condicionar la posterior identificación de genes circadianos.
+
+\subsubsection{Algoritmos de estimación del orden temporal}
+
+Los algoritmos de estimación del orden temporal comparten generalmente varios elementos metodológicos comunes: la selección o definición de un conjunto de genes circadianos de referencia (\textit{core genes} o \textit{seed genes}), la reducción de dimensionalidad de la matriz de expresión génica a partir de dichos genes, y la construcción de un espacio latente de naturaleza circular que permita representar la trayectoria circadiana subyacente de las muestras.
+
+Entre los métodos más utilizados destacan \textit{CYCLOPS} \cite{CYCLOPS}, \textit{CYCLOPS 2.0} \cite{CYCLOPS2}, \textit{PENN} \cite{penn2023}, \textit{CIRCUST} \cite{larriba2023} y \textit{CHIRAL} \cite{talamanca2023}. \textit{CYCLOPS} constituye el método de referencia en este ámbito. Su estrategia combina una reducción de dimensionalidad basada en componentes principales con un autoencoder de geometría circular que proyecta las muestras sobre una representación latente en la que la posición angular se interpreta como tiempo circadiano. Aunque ha demostrado un excelente rendimiento en aplicaciones reales, su dependencia de conjuntos de genes definidos en otras especies y la disminución de rendimiento en muestras reducidas constituyen algunas de sus principales limitaciones. \textit{CYCLOPS 2.0} extiende este enfoque permitiendo incorporar covariables durante la estimación del orden temporal. Otros algoritmos que comparten la misma filosofía de autoencoders circulares son \textit{PENN} \cite{penn2023}, \textit{PROTECT} \cite{protect_TODO} o \textit{COFE} \cite{cofe_TODO}.
+
+\textit{CHIRAL}, basado en un marco de inferencia bayesiana, permite incorporar simultáneamente información procedente de múltiples tejidos mediante la estimación conjunta de una fase circadiana global para cada donante y de fases específicas para cada tejido. La formulación bayesiana facilita además la integración de distintas fuentes de incertidumbre y de información previa sobre la organización temporal del sistema circadiano. Su principal diferencia respecto a otros enfoques radica en asumir la existencia de una fase circadiana común compartida por todos los tejidos de un mismo individuo, una hipótesis biológica todavía controvertida y cuya validez puede verse comprometida en tejidos altamente heterogéneos o bajo condiciones experimentales no estandarizadas.
+
+A diferencia de los algoritmos anteriores, \textit{CIRCUST} aborda el problema desde una perspectiva diferente, fundamentada en estadística direccional y en el modelo para el análisis de señales oscilatorias FMM (\textit{Frequency Modulated Möbius}). Su principal aportación radica en proporcionar un marco matemático explícito para formular la estimación del orden temporal como un problema de optimización sobre un espacio circular, aprovechando la naturaleza intrínsecamente periódica de los ritmos circadianos. Para ello, el método combina la selección de un conjunto inicial de genes core, una reducción de dimensionalidad no lineal mediante \textit{CPCA} (\textit{Circular Principal Component Analysis}) y el uso del modelo paramétrico FMM, cuya formulación incorpora de manera natural la geometría circular de las señales oscilatorias.
+
+Además, \textit{CIRCUST} incorpora procedimientos iterativos de refinamiento de la estimación del orden temporal con el propósito de proporcionar una caracterización robusta de marcadores circadianos, como los instantes de máxima expresión, frente a la elevada variabilidad característica de los estudios transcriptómicos \textit{post mortem}. El método ha mostrado resultados competitivos en la caracterización de genes circadianos robustos mediante parámetros interpretables del modelo FMM, como fases, amplitudes e instantes de máxima expresión génica, a partir de estimaciones iterativas del orden temporal obtenidas en un atlas de 34 tejidos humanos de GTEx. Sin embargo, su rendimiento depende en gran medida de la calidad y representatividad de los genes de referencia utilizados, así como de la capacidad de identificar de forma fiable señales rítmicas que permitan refinar progresivamente la estimación temporal, y no proporciona una única solución al problema de estimación temporal.
 
 \section{Objetivos del trabajo}
 
-Las limitaciones anteriores motivan los objetivos de este trabajo, centrado en mejorar la metodología de estimación del orden temporal del algoritmo CIRCUST. El núcleo lo constituyen varias aportaciones metodológicas, que se apoyan en una re-implementación modular y eficiente del algoritmo.
-
-\textbf{Aportaciones metodológicas.} Constituyen la contribución principal del trabajo:
+El objetivo principal de este trabajo es el desarrollo de nuevas metodologías y herramientas de \textit{software} estadístico orientadas a la extensión y optimización del algoritmo CIRCUST para la estimación del orden temporal. En particular, se persigue incrementar su flexibilidad metodológica, mejorar su eficiencia computacional y ampliar su aplicabilidad en estudios transcriptómicos humanos a gran escala, favoreciendo así su potencial uso en investigación biomédica. Para alcanzar este objetivo general, se plantean los siguientes objetivos específicos:
 \begin{enumerate}
-    \item \textbf{Modelo FMM robusto.} Implementar una versión más robusta del ajuste FMM que sustituye la función de pérdida por mínimos cuadrados (RSS) por un criterio de potencia penalizado: penaliza la rugosidad (curvatura) de la onda ajustada y pondera las muestras según su densidad temporal mediante un núcleo de von Mises. Con ello se reduce el sobreajuste al ruido y se mejora la estabilidad del ajuste, especialmente con pocas muestras o con un muestreo temporal irregular.
+    \item Re-implementación modular en Python del algoritmo \textit{CIRCUST}. Diseñar e implementar una arquitectura modular en la que cada etapa original de \textit{CIRCUST} quede aislada en componentes independientes, reproducibles, fáciles de extender y acoplar en etapas futuras, y computacionalmente eficiente. La implementación se acompañará de una guía y ejemplos de uso.
 
-    \item \textbf{Nueva metodología de sincronización.} Desarrollar un módulo dedicado a la sincronización del orden circular estimado con el tiempo biológico real. Parte de un modo manual basado en genes ancla de fase conocida y avanza hacia una \textbf{selección automática (e híbrida) del ancla}, que reduce la intervención del usuario y la dependencia de un gen prefijado.
+    \item Incorporación del modelo FMM robusto. Incorporar una variante del modelo FMM que incluya ponderación basada en el diseño temporal y mecanismos de regularización para estabilizar la estimación de perfiles oscilatorios no sinusoidales bajo condiciones de muestreo irregular.
 
-    \item \textbf{Incorporación de la ordenación agregada.} Introducir en el algoritmo una técnica de \textbf{órdenes agregados} que consolida varias ordenaciones parciales en un único orden de consenso, mejorando la robustez y la estabilidad de la estimación final del orden temporal.
+    \item Incorporación de un módulo de estimación de orden circular. Desarrollar un módulo de consenso para la estimación del orden temporal que permita obtener un único orden circular a partir de las distintas estimaciones generadas durante el proceso iterativo. Se evaluarán estrategias basadas en la minimización de discrepancias circulares y en la agregación de órdenes circulares, con el objetivo de mejorar la robustez, estabilidad y reproducibilidad de la estimación final.
 
-    \item \textbf{Nueva metodología de validación.} Diseñar un marco de validación basado en la generación de datos sintéticos con orden temporal conocido e incorporar \textbf{nuevas fórmulas que cuantifican la correlación y la similitud} entre el orden estimado y el real, como un coeficiente de correlación circular robusto y una medida de concordancia entre las reconstrucciones, que permiten evaluar de forma sistemática la calidad de la estimación bajo distintos escenarios.
-\end{enumerate}
+    \item Diseño de un experimento de simulación y validación. Diseñar un marco de validación basado en datos sintéticos que reproduzca las características de los estudios transcriptómicos circadianos, permitiendo evaluar de forma sistemática la precisión, robustez y estabilidad de la metodología propuesta para la estimación del orden temporal bajo distintos escenarios experimentales.
 
-\textbf{Objetivos de soporte.} Dan sustento computacional a las aportaciones anteriores:
-\begin{enumerate}
-    \item \textbf{Re-implementación modular en Python.} Reescribir el algoritmo CIRCUST original con una arquitectura modular, en la que cada etapa (preprocesamiento, CPCA, sincronización, selección de genes y estimación del orden) quede aislada en componentes independientes, reutilizables y fáciles de probar y extender.
-
-    \item \textbf{Optimización del rendimiento.} Reducir el tiempo de cómputo combinando la paralelización de las secciones más costosas del algoritmo con la vectorización de los cálculos numéricos.
+    \item Aplicación a un conjunto de datos reales. Evaluar la eficiencia de la metodología propuesta en conjuntos de datos de expresión humana \textit{post mortem}, así como en modelos animales. (A concretar cuando se haya realizado.)
 \end{enumerate}
 
 \section{Asignaturas relacionadas con el Trabajo de Fin de Grado}
@@ -242,13 +224,13 @@ Las limitaciones anteriores motivan los objetivos de este trabajo, centrado en m
 El desarrollo de este trabajo se apoya en competencias adquiridas en varias asignaturas del Grado en Estadística:
 
 \begin{itemize}
-    \item \textbf{Inferencia Estadística I y II.} Proporcionan el marco para la validación de los resultados, la interpretación de los p-valores y la evaluación de modelos, aspectos centrales en la metodología de validación propuesta en este trabajo.
+    \item Estadística Descriptiva e Inferencia Estadística I y II. Proporcionan el marco para la validación de los resultados, la interpretación de los p-valores y la evaluación de modelos, aspectos centrales en la metodología de validación propuesta en este trabajo.
 
-    \item \textbf{Análisis de Datos.} Aporta las técnicas de análisis multivariante y, en particular, el Análisis de Componentes Principales, que constituye la base del CPCA sobre el que se sustenta CIRCUST.
+    \item Análisis de Datos y Análisis Multivariante. Aportan las técnicas de análisis multivariante y, en particular, el Análisis de Componentes Principales, que constituye la base del CPCA sobre el que se sustenta \textit{CIRCUST}.
 
-    \item \textbf{Regresión y Anova.} Tratan el efecto de las covariables y el estudio de las correlaciones, herramientas empleadas en el análisis y la corrección de los componentes principales.
+    \item Regresión y Anova y Modelos Lineales. Estas materias conforman el pilar del modelado estadístico del grado. Aportan el marco teórico y práctico necesario para abordar la modelización de la expresión génica realizada en este trabajo.
 
-    \item \textbf{Computación Estadística.} Fundamenta la programación y la implementación computacional del algoritmo, así como su optimización.
+    \item Computación Estadística. Fundamenta la programación y la implementación computacional del algoritmo, así como su optimización.
 \end{itemize}
 
 \chapter{Metodología}
@@ -674,6 +656,26 @@ Takahashi, J. S. (2017).
 \textit{Transcriptional architecture of the mammalian circadian clock}.
 Nature Reviews Genetics, 18(3):164--179. \url{https://doi.org/10.1038/nrg.2016.150}
 
+\bibitem{halberg1969}
+Halberg, F. (1969).
+\textit{Chronobiology}.
+Annual Review of Physiology, 31:675--725. \url{https://doi.org/10.1146/annurev.ph.31.030169.003331}
+
+\bibitem{bell-pedersen2005}
+Bell-Pedersen, D., Cassone, V. M., Earnest, D. J., Golden, S. S., Hardin, P. E., Thomas, T. L., y Zoran, M. J. (2005).
+\textit{Circadian rhythms from multiple oscillators: lessons from diverse organisms}.
+Nature Reviews Genetics, 6(7):544--556. \url{https://doi.org/10.1038/nrg1633}
+
+\bibitem{mohawk2012}
+Mohawk, J. A., Green, C. B., y Takahashi, J. S. (2012).
+\textit{Central and peripheral circadian clocks in mammals}.
+Annual Review of Neuroscience, 35:445--462. \url{https://doi.org/10.1146/annurev-neuro-060909-153128}
+
+\bibitem{gomezabellan2012}
+Gómez-Abellán, P., Madrid, J. A., Ordovás, J. M., y Garaulet, M. (2012).
+\textit{Aspectos cronobiológicos de la obesidad y el síndrome metabólico}.
+Endocrinología y Nutrición, 59(1):50--61. \url{https://doi.org/10.1016/j.endonu.2011.08.002}
+
 \bibitem{klein1991}
 Klein, D. C., Moore, R. Y., y Reppert, S. M. (Eds.) (1991).
 \textit{Suprachiasmatic Nucleus: The Mind's Clock}.
@@ -706,6 +708,31 @@ Trends in Pharmacological Sciences, 39(9). \url{https://doi.org/10.1016/j.tips.2
 
 \bibitem{sahar2009}
 Sahar S, Sassone-Corsi P. \textit{Metabolism and cancer: the circadian clock connection. Nat Rev Cancer.} 2009 Dec;9(12):886-96. \url{https://doi.org/10.1038/nrc2747}. PMID: 19935677.
+
+\bibitem{ruan2021}
+Ruan, W., Yuan, X., y Eltzschig, H. K. (2021).
+\textit{Circadian rhythm as a therapeutic target}.
+Nature Reviews Drug Discovery, 20(4):287--307. \url{https://doi.org/10.1038/s41573-020-00109-w}
+
+\bibitem{bahammam2023}
+BaHammam, A. S., y Pirzada, A. (2023).
+\textit{Timing matters: the interplay between early mealtime, circadian rhythms, gene expression, circadian hormones, and metabolism -- implications for metabolic disease prevention}.
+Frontiers in Neuroendocrinology, 70:101082. \url{https://doi.org/10.3389/fnins.2023.1287933}
+
+\bibitem{fudulu2021}
+Fudulu, D. P., Dimagli, A., Sinha, S., y Angelini, G. D. (2021).
+\textit{Circadian variation in outcomes following cardiac surgery}.
+Journal of Clinical Medicine, 10(21):4966. \url{https://doi.org/10.3390/jcm10214966}
+
+\bibitem{marcu2024}
+Marcu, O., et al. (2024).
+\textit{Circadian medicine: harnessing biological rhythms for therapeutic benefit}.
+npj Biological Timing and Sleep, 1:4. \url{https://doi.org/10.1038/s44323-024-00005-3}
+
+\bibitem{ince2023}
+Ince, L. M., Barnoud, C., Gao, Y., Konsman, J. P., y Bhatt, D. L. (2023).
+\textit{Circadian clocks and the immune response to infection}.
+The Lancet Microbe, 4(11):e879--e889. \url{https://doi.org/10.1016/S2666-5247(23)00145-6}
 
 \bibitem{antoch2013}
 Antoch, M. P., y Kondratov, R. V. (2013).
@@ -782,16 +809,50 @@ Ansary Ogholbake, A., y Cheng, Q. (2023).
 \textit{PENN: Phase Estimation Neural Network on Gene Expression Data}.
 En \textit{Deep Learning, Big Data and Blockchain (DBB 2023)}. Lecture Notes in Networks and Systems, vol. 768, pp. 59--67. Springer. \url{https://doi.org/10.1007/978-3-031-42317-8_5}
 
+\bibitem{protect_TODO}
+Ansary Ogholbake, A., y Cheng, Q. (2025).
+\textit{PROTECT: Protein circadian time prediction using unsupervised learning}.
+iScience, 28(10):113605. \url{https://doi.org/10.1016/j.isci.2025.113605}
+
+\bibitem{cofe_TODO}
+Ananthasubramaniam, B., y Venkataramanan, R. (2025).
+\textit{Rhythm profiling using COFE reveals multi-omic circadian rhythms in human cancers in vivo}.
+PLoS Biology, 23(5):e3003196. \url{https://doi.org/10.1371/journal.pbio.3003196}
+
 \bibitem{chiral2020}
+Talamanca, L. (2023).
+\textit{Statistical physics of periodic biological processes} (Tesis doctoral).
+École Polytechnique Fédérale de Lausanne (EPFL), Lausana.
+
+\bibitem{talamanca2023}
 Talamanca, L., et al. (2023).
 \textit{Sex-dimorphic and age-dependent organization of 24-hour gene expression rhythms in humans}.
 Science, 379(6631):478-483. \url{https://doi.org/10.1126/science.add0846}
-% (Nota: Talamanca et al. son los creadores y máximos exponentes del uso del algoritmo CHIRAL sobre los datos del GTEx).
 
 \bibitem{ruben2018}
 Ruben, M. D., Wu, G., Smith, D. F., Schmidt, R. E., Francey, L. J., Lee, Y. Y., et al. (2018).
 \textit{A database of tissue-specific rhythmically expressed human genes has potential applications in circadian medicine}.
 Science Translational Medicine, 10(458):eaat8806. \url{https://doi.org/10.1126/scitranslmed.aat8806}
+
+\bibitem{rain2014}
+Thaben, P. F., y Westermark, P. O. (2014).
+\textit{Detecting rhythms in time series with RAIN}.
+Journal of Biological Rhythms, 29(6):391--400. \url{https://doi.org/10.1177/0748730414553029}
+
+\bibitem{jtkcycle2010}
+Hughes, M. E., Hogenesch, J. B., y Kornacker, K. (2010).
+\textit{JTK\_CYCLE: an efficient nonparametric algorithm for detecting rhythmic components in genome-scale data sets}.
+Journal of Biological Rhythms, 25(5):372--380. \url{https://doi.org/10.1177/0748730410379711}
+
+\bibitem{dyar2018}
+Dyar, K. A., Lutter, D., Artati, A., Ceglia, N. J., Liu, Y., Armenta, D., et al. (2018).
+\textit{Atlas of circadian metabolism reveals system-wide coordination and communication between clocks}.
+Cell, 174(6):1571--1585. \url{https://doi.org/10.1016/j.cell.2018.08.042}
+
+\bibitem{wei2022}
+Wei, H., y Bhatt, D. L. (2022).
+\textit{Circadian rhythm in cardiovascular disease}.
+Nature Reviews Cardiology, 19:726--727. \url{https://doi.org/10.1038/s41569-022-00746-9}
 
 \bibitem{wu2018}
 Wu, G., Ruben, M. D., Schmidt, R. E., Francey, L. J., Smith, D. F., Anafi, R. C., et al. (2018).
@@ -802,6 +863,16 @@ Proceedings of the National Academy of Sciences of the United States of America,
 Mure, L. S., Le, H. D., Benegiamo, G., Chang, M. W., Rios, L., Jillani, N., et al. (2018).
 \textit{Diurnal transcriptome atlas of a primate across major neural and peripheral tissues}.
 Science, 359(6381):eaao0318. \url{https://doi.org/10.1126/science.aao0318}
+
+\bibitem{kimura2023}
+Kimura, M., Murase, K., Azuma, M., Toyama, Y., Aihara, K., Oga, T., Chin, K., y Takahashi, K. (2023).
+\textit{Irregular sampling bias in post-mortem transcriptomic circadian studies}.
+Chronobiology International, 40(4):472--481. \url{https://doi.org/10.1080/07420528.2023.2178692}
+
+\bibitem{gorczyca2025}
+Gorczyca, M. T., y Mostafavi, S. (2025).
+\textit{Characterizing circadian gene expression in the human brain using post-mortem RNA-seq data}.
+PLOS Computational Biology, 21(1):e1012685. \url{https://doi.org/10.1371/journal.pcbi.1012685}
 
 \bibitem{lech2016}
 Lech, K., Ackermann, K., Revell, V. L., Lao, O., Skene, D. J., y Kayser, M. (2016).
