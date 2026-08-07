@@ -268,17 +268,42 @@ def auc_error_cdf(
         - ``AUC = 1.0``: predictor perfecto (todos los errores = 0).
         - ``AUC ~ 0.5``: predictor aleatorio (errores distribuidos
           uniformemente en ``[0, period/2]``).
+        - ``AUC = 0.0``: todos los errores en el maximo posible, ``period/2``.
+
+    Forma cerrada
+    -------------
+    El CDF empirico de los errores es una funcion escalonada,
+
+        F(e) = (1/n) * #{i : e_i <= e},
+
+    de modo que el area bajo el, normalizada por el error maximo
+    ``m = period/2``, se integra exactamente sin necesidad de cuadratura:
+
+        AUC = (1/m) * Integral_0^m F(e) de
+            = (1/m) * (1/n) * Sum_i (m - e_i)
+            = 1 - media(e) / m.
+
+    Nota sobre una version anterior
+    -------------------------------
+    La implementacion previa evaluaba la integral con la regla del trapecio
+    sobre los puntos ``(e_(i), i/n)``. Eso interpola en linea recta el primer
+    escalon, que en un CDF empirico es una discontinuidad, e introducia un
+    sesgo positivo de exactamente ``1/(2n)``: con todos los errores en el
+    maximo devolvia ``0,05`` para ``n = 10`` en lugar de ``0``. El sesgo es
+    sistematico y solo depende del tamano muestral, de modo que no altera la
+    comparacion entre variantes evaluadas sobre el mismo numero de muestras,
+    pero si desplaza el valor absoluto y lo hace incomparable con cifras
+    publicadas, que es justamente el uso que se le da a esta metrica. Con los
+    tamanos muestrales pequenos de los escenarios sinteticos habituales, del
+    orden de una o dos docenas de muestras, el sesgo llegaba a 0,04, que es
+    del orden de las diferencias que se pretenden medir.
     """
     errors = circular_abs_diff(predicted, true, period)
-    n      = errors.size
-    if n == 0:
+    if errors.size == 0:
         return float("nan")
 
-    max_err  = period / 2.0
-    sorted_e = np.sort(errors)
-    cdf_x    = np.concatenate([[0.0], sorted_e, [max_err]])
-    cdf_y    = np.concatenate([[0.0], np.arange(1, n + 1) / n, [1.0]])
-    return float(np.trapezoid(cdf_y, cdf_x) / max_err)
+    max_err = period / 2.0
+    return float(1.0 - errors.mean() / max_err)
 
 
 def circular_correlation(
