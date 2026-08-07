@@ -20,10 +20,3 @@ docs/sphinx/_build/
 # Artefactos de LaTeX en la raiz
 texput.log
 texput.*
-
-# Espacio de trabajo de los flujos de subagentes
-.superpowers/
-
-# Los planes de trabajo si se versionan
-!/docs/superpowers/
-!/docs/superpowers/**
