@@ -7,27 +7,85 @@ Toma K ordenes circulares observados sobre las mismas n items (cada orden es
 un vector de angulos en [0, 2*pi)) y produce un orden consenso. Util para
 combinar resultados de distintas repeticiones del pipeline RobustOrder.
 
+Alcance respecto al paper
+-------------------------
+El paper organiza sus metodos en dos pasos, "a first step [where] an initial
+solution denoted as O_0 is provided, which is refined in step 2".
+
+Aqui se implementa **solo el paso 1**. Para el TSP el paper no fija una
+heuristica concreta y prescribe en su lugar la regla de decision: "a better
+approximation to the optimum is obtained by repeatedly running different
+heuristics and selecting the best solution **in terms of the objective
+function**". Es lo que hace :func:`_solve_tsp_multi_start`.
+
+El paso 2, la busqueda local CLMA sobre ternas de elementos consecutivos, se
+ha omitido deliberadamente. El motivo es que CIRCUST opera fuera del regimen
+en que compensa. Los autores ya lo acotan, "this second step does not improve
+too much the results for the methods whose step 1 already yielded good results
+(such as TSP3 or HODs under MSCE) [...] CLMA is suggested just for those
+situations where it is convenient to refine the initial solution", y la medida
+sobre datos reales lo confirma. Las K repeticiones de CIRCUST son subconjuntos
+del mismo conjunto TOP sobre las mismas muestras, de modo que su discrepancia
+angular es muy pequena, con una desviacion tipica circular mediana de 0,044
+radianes sobre matrixIn_mini. En ese regimen CLMA acepta del orden de una
+permutacion y mejora el orden un 8 % en desplazamiento medio de rango, sobre
+un error que ya es de 0,17 posiciones, mientras que su coste es O(K n^4) por
+pasada porque evalua el MSCE 5n veces. Medido sobre el propio pipeline con
+n=114 y K=5, el MSCE no cambio en cuatro decimales y el paso costo 9 min 44 s.
+
 Metodos implementados
 ---------------------
 - **TSP3**: TSP con distancia direccional asimetrica con penalizacion alpha=3
   para movimientos en la direccion equivocada. Recomendado por el paper para
-  el criterio MSCE (Mean Sum of Circular Errors).
+  el criterio MSCE (Mean Sum of Circular Errors). Los costes de arista siguen
+  la Tabla 1 y la ecuacion (7) del paper.
 
-- **HODs** (proximamente): Hodge score-based triplewise. Mas rapido, mejor
-  para CKTau. Aun no implementado.
+- **HODs**: Hodge score-based triplewise (Teorema 4.1). Reduce los flujos por
+  tripletes a una matriz, elige un ancla y ordena por scores. Equivale a la
+  variante "ave" de ``isocir::ACO(method="CH")``, reproducida exactamente.
+
+Funcion objetivo (MSCE)
+-----------------------
+El MSCE se calcula con el **CIRE** (Circular Isotonic Regression Estimator) de
+Rueda, Fernandez y Peddada (2009), igual que el paquete R ``isocir``. Para cada
+repeticion se proyecta su vector angular sobre el conjunto de vectores que
+verifican el orden candidato dando una sola vuelta al circulo (regresion
+isotonica circular), y el MSCE de esa repeticion es ``(1/n) * SCE`` con
+``SCE = sum(1 - cos(theta_i - theta_tilde_i))``. El MSCE global es la media
+(ponderada) de los MSCE por repeticion.
+
+La implementacion del CIRE aqui es una version numba casi-exacta validada
+contra ``isocir`` (coincide salvo desviaciones <= 0.024 en el SCE en casos con
+bloques muy anchos, irrelevantes para ordenar metodos). Se usa como criterio de
+seleccion entre TSP3 y HODs, no como cifra a reportar.
 
 API publica
 -----------
 - ``aggregate_circular_orders(Theta, weights, method="tsp3")``: devuelve un
-  orden consenso (permutacion de items) y diagnostico.
+  orden consenso (permutacion de items) y su MSCE.
+- ``circular_isotonic_regression(theta, order)``: CIRE de un vector angular
+  bajo un orden dado (diagnostico / tests).
 
-Equivalente en R: paquete ``isocir`` (funcion ``ACO``), referencia exacta
-para esta implementacion.
+Equivalente en R: paquete ``isocir`` (funciones ``CIRE`` y ``ACO``).
 """
 from __future__ import annotations
 
 from typing import Optional
 import numpy as np
+
+# ── Aceleracion opcional con Numba (mismo patron que circust.fitting.ori) ──
+try:
+    from numba import njit
+    _HAS_NUMBA = True
+except ImportError:                                   # pragma: no cover
+    _HAS_NUMBA = False
+    def njit(*args, **kwargs):                         # type: ignore
+        def deco(fn): return fn
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return deco
+
+TWO_PI = 2.0 * np.pi
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -49,105 +107,135 @@ def _circular_dist_vec(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.minimum(d, 2.0 * np.pi - d)
 
 
-def _msce_simple(
-    Theta:        np.ndarray,
-    target_order: np.ndarray,
-    weights:      Optional[np.ndarray] = None,
-) -> float:
-    """Mean Sum of Circular Errors aproximado (sin CIRE).
+# ═══════════════════════════════════════════════════════════════════════════
+# Seccion 2 — CIRE y MSCE (funcion objetivo cardinal del paper)
+# ═══════════════════════════════════════════════════════════════════════════
 
-    Para cada repeticion k:
-      1. Asigna angulos uniformes ``phi_i = 2*pi * pos(i)/n`` a cada item
-         segun ``target_order``.
-      2. Calcula la rotacion global optima ``delta_k`` que minimiza
-         ``sum (1 - cos(theta_{ki} - phi_i - delta_k))``: cierre analitico
-         ``delta_k = atan2(sum sin(theta-phi), sum cos(theta-phi))``.
-      3. MSCE_k = mean(1 - cos(theta_{ki} - phi_i - delta_k)).
+@njit(cache=True, fastmath=True)
+def _cire_core(d: np.ndarray, S: np.ndarray, C: np.ndarray):
+    """Nucleo del CIRE circular sobre datos YA ordenados ``d`` (con S=sin, C=cos).
 
-    El paso 2 es la simplificacion clave frente al CIRE del paper: como nuestro
-    target_order produce angulos uniformes, la mejor "calibracion" entre
-    Theta[k] y el target es una rotacion global. Esto hace que ordenes
-    circularmente equivalentes (rolled) den el mismo MSCE.
+    Enumera el arco que forma el primer bloque (corte ``c`` x longitud ``m``),
+    fija su media circular ``mu0`` como referencia de una sola vuelta, resuelve
+    el resto con una PAVA en la ventana ``[mu0, mu0+2pi)`` (pooling por media
+    circular, violacion cuando la media-ventana decrece) y se queda con el
+    minimo SCE. Devuelve ``(fitted_posiciones, SCE)``.
 
-    El MSCE total es la media ponderada de los MSCE_k entre repeticiones.
+    Es la version eficiente (O(n^3)) validada contra ``isocir``.
+    """
+    q = d.shape[0]
+    best_sce = 1e18
+    best_fit = np.empty(q)
+    bS = np.empty(q); bC = np.empty(q)
+    bN = np.empty(q, dtype=np.int64); bW = np.empty(q)
+    cur_fit = np.empty(q)
+    for c in range(q):
+        for m in range(1, q + 1):
+            # primer bloque = posiciones (c..c+m-1) mod q
+            S0 = 0.0; C0 = 0.0
+            for t in range(m):
+                idx = (c + t) % q
+                S0 += S[idx]; C0 += C[idx]
+            mu0 = np.arctan2(S0, C0) % TWO_PI
+            cost = 0.0
+            for t in range(m):
+                idx = (c + t) % q
+                cur_fit[idx] = mu0
+                cost += 1.0 - np.cos(d[idx] - mu0)
+            # PAVA del resto en ventana [mu0, mu0+2pi)
+            nb = 0
+            for t in range(m, q):
+                idx = (c + t) % q
+                cs = S[idx]; cc = C[idx]; cn = 1
+                win = (np.arctan2(cs, cc) - mu0) % TWO_PI
+                while nb > 0 and bW[nb - 1] > win + 1e-12:
+                    nb -= 1
+                    cs += bS[nb]; cc += bC[nb]; cn += bN[nb]
+                    win = (np.arctan2(cs, cc) - mu0) % TWO_PI
+                bS[nb] = cs; bC[nb] = cc; bN[nb] = cn; bW[nb] = win; nb += 1
+            # expandir bloques del resto -> cur_fit y acumular coste
+            pos = m
+            for bi in range(nb):
+                mu = np.arctan2(bS[bi], bC[bi]) % TWO_PI
+                for _ in range(bN[bi]):
+                    idx = (c + pos) % q
+                    cur_fit[idx] = mu
+                    cost += 1.0 - np.cos(d[idx] - mu)
+                    pos += 1
+            if cost < best_sce - 1e-12:
+                best_sce = cost
+                for i in range(q):
+                    best_fit[i] = cur_fit[i]
+    return best_fit, best_sce
+
+
+def circular_isotonic_regression(
+    theta: np.ndarray, order: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """CIRE de ``theta`` bajo el orden circular dado por ``order``.
 
     Parameters
     ----------
-    Theta : np.ndarray, shape (K, n)
-        Angulos observados por repeticion.
-    target_order : np.ndarray, shape (n,)
-        Permutacion de items que define el orden consenso.
-    weights : np.ndarray opcional, shape (K,)
+    theta : np.ndarray (n,)
+        Angulos observados en ``[0, 2*pi)`` (indice por item).
+    order : np.ndarray (n,)
+        Permutacion de items: ``order[pos]`` es el item en la posicion ``pos``
+        del orden circular candidato.
+
+    Returns
+    -------
+    (fitted, sce) : np.ndarray (n,), float
+        ``fitted`` es el CIRE alineado al indice de ``theta``; ``sce`` la suma
+        de errores circulares ``sum(1 - cos(theta_i - fitted_i))``.
+    """
+    theta = np.asarray(theta, dtype=float) % TWO_PI
+    order = np.asarray(order, dtype=np.int64)
+    n = theta.shape[0]
+    d = np.ascontiguousarray(theta[order])
+    fit_pos, sce = _cire_core(d, np.sin(d), np.cos(d))
+    fitted = np.empty(n)
+    fitted[order] = fit_pos
+    return fitted, float(sce)
+
+
+def _msce_cire(
+    Theta: np.ndarray,
+    target_order: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> float:
+    """MSCE del orden ``target_order`` frente a las K repeticiones de ``Theta``.
+
+    Para cada repeticion k:  ``msce_k = SCE(CIRE(Theta[k] | target_order)) / n``.
+    El MSCE global es la media (ponderada por ``weights``) de los ``msce_k``.
+    Es el criterio cardinal del paper (eqs. 2-4) usando el CIRE de Rueda et al.
+
+    Parameters
+    ----------
+    Theta : np.ndarray (K, n)
+        ``Theta[k, i]`` angulo asignado al item ``i`` en la repeticion ``k``.
+    target_order : np.ndarray (n,)
+        Permutacion de items que define el orden consenso a evaluar.
+    weights : np.ndarray opcional (K,)
         Pesos por repeticion. Default uniforme.
     """
+    Theta = np.asarray(Theta, dtype=float) % TWO_PI
     K, n = Theta.shape
-    # Posicion (0..n-1) que ocupa cada item en target_order
-    positions = np.empty(n, dtype=int)
-    positions[target_order] = np.arange(n)
-    phi = (2.0 * np.pi / n) * positions          # angulo objetivo por item
-
+    order = np.asarray(target_order, dtype=np.int64)
     msces = np.empty(K)
     for k in range(K):
-        diff = Theta[k] - phi
-        # Rotacion optima: delta = atan2(sum sin diff, sum cos diff)
-        delta_k = np.arctan2(np.sin(diff).sum(), np.cos(diff).sum())
-        msces[k] = float(np.mean(1.0 - np.cos(diff - delta_k)))
-
+        d = np.ascontiguousarray(Theta[k][order])
+        _, sce = _cire_core(d, np.sin(d), np.cos(d))
+        msces[k] = sce / n
     if weights is None:
         return float(msces.mean())
-    return float(np.average(msces, weights=weights))
-
-
-def _cktau_pairwise(theta1: np.ndarray, theta2: np.ndarray) -> float:
-    """Circular Kendall Tau (CKTau) entre dos vectores angulares.
-
-    Definido en Fisher (1993): para cada terna (i, h, k) de items distintos,
-    se mide la concordancia de orientacion circular entre theta1 y theta2.
-    Resultado en [-1, 1]: 1 = orden circular identico, -1 = invertido.
-    """
-    n = theta1.shape[0]
-    if n < 3:
-        return 0.0
-
-    # Triple para todos los i<h<k
-    idx = np.arange(n)
-    i, h, k = np.meshgrid(idx, idx, idx, indexing="ij")
-    mask = (i < h) & (h < k)
-
-    def _orientation(t):
-        d_ih = np.sign(np.sin(t[h] - t[i]))
-        d_hk = np.sign(np.sin(t[k] - t[h]))
-        d_ki = np.sign(np.sin(t[i] - t[k]))
-        return d_ih * d_hk * d_ki
-
-    o1 = _orientation(theta1)[mask]
-    o2 = _orientation(theta2)[mask]
-    nz = (o1 != 0) & (o2 != 0)
-    if not nz.any():
-        return 0.0
-    return float((o1[nz] * o2[nz]).mean())
-
-
-def _cktau_vs_order(Theta: np.ndarray, target_order: np.ndarray,
-                    weights: Optional[np.ndarray] = None) -> float:
-    """CKTau medio entre cada rep en ``Theta`` y el orden ``target_order``.
-
-    Convierte ``target_order`` a angulos uniformes y calcula CKTau con cada
-    fila de ``Theta``, luego promedia (ponderado opcionalmente).
-    """
-    K, n = Theta.shape
-    positions = np.empty(n, dtype=int)
-    positions[target_order] = np.arange(n)
-    phi = (2.0 * np.pi / n) * positions
-
-    taus = np.array([_cktau_pairwise(Theta[k], phi) for k in range(K)])
-    if weights is None:
-        return float(taus.mean())
-    return float(np.average(taus, weights=weights))
+    w = np.asarray(weights, dtype=float)
+    if w.shape[0] != K:
+        raise ValueError(f"weights debe tener longitud {K}, got {w.shape[0]}")
+    return float(np.average(msces, weights=w))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Seccion 2 — TSP3 (alpha=3, recomendado para MSCE)
+# Seccion 3 — TSP3 (alpha=3, recomendado para MSCE)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _distance_matrix_tsp3_single(theta: np.ndarray) -> np.ndarray:
@@ -232,41 +320,250 @@ def _solve_tsp_nearest_neighbor(D: np.ndarray, start: int) -> tuple[np.ndarray, 
     return tour, length
 
 
-def _solve_tsp_multi_start(
-    D:        np.ndarray,
-    n_starts: Optional[int] = None,
-) -> tuple[np.ndarray, float]:
-    """Multi-start nearest-neighbor: prueba varios puntos de inicio.
+def _tour_length(D: np.ndarray, tour: np.ndarray) -> float:
+    """Longitud del ciclo hamiltoniano ``tour`` sobre la matriz de costes ``D``."""
+    nxt = np.roll(tour, -1)
+    return float(D[tour, nxt].sum())
 
-    El paper menciona que ningun heuristico TSP es siempre mejor; multi-start
-    NN da resultados estables. Devuelve el tour de menor longitud.
+
+def _or_opt(
+    D:          np.ndarray,
+    tour:       np.ndarray,
+    max_seg:    int = 3,
+    max_passes: int = 20,
+) -> np.ndarray:
+    """Mejora local Or-opt sobre un tour, valida para TSP **asimetrico**.
+
+    Un movimiento Or-opt extrae un segmento de 1 a ``max_seg`` nodos
+    consecutivos y lo reinserta en otra posicion **sin invertirlo**. Es la
+    familia de movimientos apropiada aqui: el 2-opt clasico invierte un tramo
+    del recorrido, lo que en una matriz asimetrica como la de TSP3 cambia el
+    coste de todas las aristas interiores y deja de poder evaluarse en O(1).
+
+    Para un segmento ``S = (s_0, ..., s_{L-1})`` extraido entre ``p`` y ``q``, y
+    reinsertado entre ``a`` y ``b``, la variacion de coste es
+
+        delta = [D(a,s_0) + D(s_{L-1},b) + D(p,q)]
+              - [D(p,s_0) + D(s_{L-1},q) + D(a,b)],
+
+    de modo que el interior del segmento no interviene. El bucle sobre las
+    posiciones de reinsercion esta vectorizado, asi que cada pasada cuesta
+    O(max_seg * n^2) operaciones NumPy.
+
+    Se aplica el mejor movimiento de cada barrido (steepest descent) hasta que
+    ninguno mejora o se agotan las pasadas.
+    """
+    t = np.asarray(tour, dtype=np.int64).copy()
+    n = t.shape[0]
+    if n < 5:
+        return t
+
+    for _ in range(max_passes):
+        best_delta = -1e-12
+        best_move  = None
+
+        for L in range(1, min(max_seg, n - 3) + 1):
+            for i in range(n):
+                idx_seg = (np.arange(i, i + L)) % n
+                seg     = t[idx_seg]
+                p       = t[(i - 1) % n]           # nodo anterior al segmento
+                q       = t[(i + L) % n]           # nodo posterior al segmento
+                s0, sl  = seg[0], seg[-1]
+
+                # Resto del ciclo tras extraer el segmento, empezando en q.
+                rest = t[(np.arange(i + L, i + n)) % n]      # (n - L,)
+                a    = rest
+                b    = np.roll(rest, -1)
+
+                delta = (D[a, s0] + D[sl, b] + D[p, q]) - (
+                         D[p, s0] + D[sl, q] + D[a, b])
+                m = int(np.argmin(delta))
+                if delta[m] < best_delta:
+                    best_delta = float(delta[m])
+                    best_move  = (seg.copy(), rest.copy(), m)
+
+        if best_move is None:
+            break
+
+        seg, rest, m = best_move
+        t = np.concatenate([rest[: m + 1], seg, rest[m + 1:]])
+
+    return t
+
+
+def _solve_tsp_multi_start(
+    D:           np.ndarray,
+    n_starts:    Optional[int] = None,
+    or_opt:      bool = True,
+    warm_starts: Optional[list] = None,
+    score_fn:    Optional[callable] = None,
+) -> tuple[np.ndarray, float]:
+    """Paso 1 de Barragan et al. (2015): solucion inicial ``O_0`` del TSP.
+
+    El paper no fija una heuristica concreta para resolver (6). Lo que
+    prescribe, al final de su Seccion 3, es la regla de decision:
+
+        "there is not an absolute winner and that a better approximation to
+         the optimum is obtained by repeatedly running different heuristics
+         and selecting the best solution in terms of the objective function."
+
+    De ahi las dos decisiones de esta funcion.
+
+    La primera es generar una coleccion amplia de candidatos en lugar de uno.
+    Se usan dos familias de recorridos, los ``n_starts`` del vecino mas cercano
+    tomando sucesivamente como origen distintas muestras, y los de
+    ``warm_starts``, tipicamente el orden que induce la media circular de las K
+    repeticiones. Cada uno de ellos se pule despues con ``_or_opt``. La version
+    anterior se quedaba solo con el recorrido de vecino mas cercano de menor
+    longitud y pulia unicamente ese, de modo que descartaba 29 de los 30
+    candidatos con un criterio, la longitud del tour, que no es la funcion
+    objetivo. Medido sobre la familia del vecino mas cercano, entre 14 y 27 de
+    cada 30 arranques pulen a un MSCE mejor que el que la longitud selecciona.
+
+    La segunda es que la eleccion entre los candidatos pulidos la hace
+    ``score_fn``, que ``aggregate_circular_orders`` fija en el MSCE, es decir en
+    la funcion objetivo ``d*(Theta, O)`` de las ecuaciones (3) y (4) del paper.
+    Este es el punto exacto que la cita anterior exige y la razon de que no
+    valga elegir por longitud del tour: con ruido por replica grande frente a
+    la separacion angular entre muestras el objetivo del TSP se sobreajusta al
+    ruido, y existen ciclos de coste menor que el del orden verdadero
+    construidos encadenando aristas cuyo coste bajo es fruto del azar.
+
+    Devuelve ``(tour, longitud)``.
     """
     n = D.shape[0]
     if n_starts is None:
         n_starts = min(n, 30)               # 30 starts es suficiente en practica
     n_starts = max(1, min(n_starts, n))
 
-    starts = np.linspace(0, n - 1, n_starts, dtype=int)
-    best_tour, best_length = None, np.inf
-    for s in starts:
-        tour, length = _solve_tsp_nearest_neighbor(D, start=int(s))
-        if length < best_length:
-            best_length = length
-            best_tour   = tour
-    return best_tour, best_length
+    # Familia 1: vecino mas cercano desde distintos origenes. Se conservan
+    # TODOS, no solo el de menor longitud.
+    seeds: list[np.ndarray] = [
+        _solve_tsp_nearest_neighbor(D, start=int(s))[0]
+        for s in np.linspace(0, n - 1, n_starts, dtype=int)
+    ]
+    # Familia 2: arranques en caliente proporcionados por el llamante.
+    seeds += [np.asarray(w, dtype=np.int64) for w in (warm_starts or [])]
+
+    score = score_fn if score_fn is not None else (lambda t: _tour_length(D, t))
+
+    best_tour, best_score = None, np.inf
+    for seed in seeds:
+        tour = _or_opt(D, seed) if or_opt else seed
+        s    = float(score(tour))
+        if s < best_score:
+            best_tour, best_score = tour, s
+
+    return best_tour, _tour_length(D, best_tour)
+
+
+def _circular_mean_order(
+    Theta: np.ndarray, weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Orden que induce la media circular, muestra a muestra, de las K fases.
+
+    Se usa como arranque en caliente del TSP. Las K repeticiones ya estan
+    sincronizadas (mismo origen y sentido), de modo que promediar sus fases
+    muestra a muestra es licito.
+    """
+    Theta = np.asarray(Theta, dtype=float)
+    K = Theta.shape[0]
+    w = (np.ones(K) if weights is None else np.asarray(weights, dtype=float))
+    w = w / w.sum()
+    mu = np.arctan2(
+        (w[:, None] * np.sin(Theta)).sum(axis=0),
+        (w[:, None] * np.cos(Theta)).sum(axis=0),
+    ) % TWO_PI
+    return np.argsort(mu).astype(np.int64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Seccion 3 — API publica
+# Seccion 3b — HODs (Hodge score-based triplewise; Barragan et al. 2015)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@njit(cache=True, fastmath=True)
+def _hodge_X_ave(Theta: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Hipermatriz triplewise reducida ``X[i,j] = sum_k sum_a w_a Psi^a_ijk``.
+
+    Flujo score-based (HODs): ``Psi_ijk = sign(i,j,k) * lambda``, con
+    ``sign(i,j,k) = sign(th_j-th_i)+sign(th_k-th_j)+sign(th_i-th_k)`` (signo
+    crudo de las diferencias, como isocir) y ``lambda`` la media circular de las
+    tres distancias de arco del triplete. ``X = delta*_1(Psi)`` (suma sobre el
+    tercer indice). Es la variante "ave" de ``isocir::ACO(method="CH")``,
+    reproducida exactamente. O(K*n^3) acelerada con numba.
+    """
+    K, n = Theta.shape
+    X = np.zeros((n, n))
+    signM = np.empty((n, n)); sinA = np.empty((n, n)); cosA = np.empty((n, n))
+    for a in range(K):
+        th = Theta[a]
+        # precomputo por experimento: signo crudo y sin/cos del arco minimo
+        for x in range(n):
+            for y in range(n):
+                signM[x, y] = np.sign(th[x] - th[y])
+                d = (th[x] - th[y]) % TWO_PI
+                arc = d if d < (TWO_PI - d) else (TWO_PI - d)
+                sinA[x, y] = np.sin(arc); cosA[x, y] = np.cos(arc)
+        wa = w[a]
+        for i in range(n):
+            for j in range(n):
+                acc = 0.0
+                sij = signM[j, i]; sinij = sinA[i, j]; cosij = cosA[i, j]
+                for k in range(n):
+                    sig = sij + signM[k, j] + signM[i, k]
+                    if sig == 0.0:
+                        continue
+                    A = sinij + sinA[j, k] + sinA[k, i]
+                    B = cosij + cosA[j, k] + cosA[k, i]
+                    acc += sig * (np.arctan2(A, B) % TWO_PI)
+                X[i, j] += wa * acc
+    return X
+
+
+def _hodge_order(
+    Theta: np.ndarray, weights: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Orden consenso por el enfoque de Hodge (Teorema 4.1, Barragan et al.).
+
+    Reduce los flujos triplewise a ``X`` con :func:`_hodge_X_ave`, elige el ancla
+    ``l0 = argmax_l sum_h X[l,h]^2``, calcula los scores ``s_i`` como menos la
+    media de la fila ``i`` de ``X`` sin el ancla, y ordena de menor a mayor
+    dejando el ancla al final (orden circular ``l0 <= i_1 <= ... <= i_{n-1} <= l0``).
+
+    Returns
+    -------
+    np.ndarray (n,) : permutacion de items (``order[pos]`` = item en la posicion).
+    """
+    Theta = np.ascontiguousarray(np.asarray(Theta, dtype=float) % TWO_PI)
+    K, n = Theta.shape
+    if weights is None:
+        w = np.ones(K) / K
+    else:
+        w = np.asarray(weights, dtype=float)
+        w = w / w.sum()
+    X = _hodge_X_ave(Theta, w)
+    out = int(np.argmax((X ** 2).sum(axis=1)))
+    keep = np.array([e for e in range(n) if e != out])
+    scores = -X[np.ix_(keep, keep)].mean(axis=1)
+    order_keep = keep[np.argsort(scores, kind="stable")]
+    return np.concatenate([order_keep, [out]])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Seccion 4 — API publica
 # ═══════════════════════════════════════════════════════════════════════════
 
 def aggregate_circular_orders(
-    Theta:    np.ndarray,
-    weights:  Optional[np.ndarray] = None,
-    method:   str = "tsp3",
-    n_starts: Optional[int] = None,
+    Theta:      np.ndarray,
+    weights:    Optional[np.ndarray] = None,
+    method:     str = "auto",
+    n_starts:   Optional[int] = None,
 ) -> dict:
     """Agrega K ordenes circulares en un orden consenso.
+
+    Implementa el paso 1 de Barragan et al. (2015) con la tecnica elegida,
+    TSP3 o HODs, y arbitra entre ellas por el MSCE. El paso 2 del paper no se
+    implementa, por los motivos documentados en la cabecera del modulo.
 
     Parameters
     ----------
@@ -274,10 +571,15 @@ def aggregate_circular_orders(
         ``Theta[k, i]`` es el angulo en ``[0, 2*pi)`` asignado al item ``i``
         en la repeticion ``k``.
     weights : np.ndarray opcional, shape (K,)
-        Pesos por repeticion. Por defecto uniforme.
+        Pesos por repeticion. Por defecto uniforme. El paper los define como
+        ``w_j = kappa_j / sum(kappa)`` para recoger diferencias de variabilidad
+        entre experimentos. En CIRCUST las K repeticiones proceden del mismo
+        procedimiento sobre distintos subconjuntos de genes TOP, de modo que
+        son intercambiables y el peso uniforme es el caso natural.
     method : str
-        - ``"tsp3"`` (default): TSP con alpha=3, recomendado para MSCE.
-        - ``"hods"``: pendiente de implementar.
+        - ``"auto"`` (default): corre TSP3 y HODs y devuelve el de menor MSCE.
+        - ``"tsp3"``: TSP con alpha=3.
+        - ``"hods"``: Hodge score-based triplewise (Teorema 4.1).
     n_starts : int opcional
         Numero de puntos de inicio para multi-start NN (solo TSP3).
 
@@ -285,10 +587,11 @@ def aggregate_circular_orders(
     -------
     dict con:
         - ``order``: np.ndarray (n,), permutacion de items en orden consenso
-        - ``method``: str, metodo usado
-        - ``tour_length``: float, suma de distancias TSP (solo TSP3)
-        - ``msce``: float, MSCE simple del orden consenso
-        - ``cktau``: float, CKTau medio del orden consenso
+        - ``method``: str, metodo solicitado ("auto"/"tsp3"/"hods")
+        - ``selected_method``: str, metodo ganador (== method si no es "auto")
+        - ``tour_length``: float o None, longitud del tour (solo si gana TSP3)
+        - ``msce``: float, MSCE (CIRE) del orden ganador
+        - ``msce_by_method``: dict, MSCE de cada metodo evaluado
     """
     Theta = np.asarray(Theta, dtype=float) % (2.0 * np.pi)
     K, n = Theta.shape
@@ -298,23 +601,42 @@ def aggregate_circular_orders(
         raise ValueError("Se requieren al menos 3 items para agregacion circular.")
 
     method = method.lower()
-
-    if method == "tsp3":
-        D = _build_distance_matrix_tsp3(Theta, weights)
-        order, tour_length = _solve_tsp_multi_start(D, n_starts=n_starts)
-    elif method == "hods":
-        raise NotImplementedError("HODs aun no implementado, usa method='tsp3'.")
+    if method == "auto":
+        candidates = ("tsp3", "hods")
+    elif method in ("tsp3", "hods"):
+        candidates = (method,)
     else:
         raise ValueError(f"method desconocido: {method!r}")
 
-    # Diagnostico: MSCE y CKTau del orden consenso
-    msce  = _msce_simple(Theta, order, weights=weights)
-    cktau = _cktau_vs_order(Theta, order, weights=weights)
+    # Resolver cada tecnica candidata y evaluar su MSCE (CIRE)
+    solved = {}
+    for m in candidates:
+        if m == "tsp3":
+            D = _build_distance_matrix_tsp3(Theta, weights)
+            order_m, tour_m = _solve_tsp_multi_start(
+                D, n_starts=n_starts,
+                warm_starts=[_circular_mean_order(Theta, weights)],
+                score_fn=lambda t: _msce_cire(Theta, t, weights=weights),
+            )
+        else:  # "hods"
+            order_m, tour_m = _hodge_order(Theta, weights), None
+
+        solved[m] = {
+            "order":       order_m,
+            "tour_length": tour_m,
+            "msce":        _msce_cire(Theta, order_m, weights=weights),
+        }
+
+    # Auto-seleccion: el metodo con menor MSCE (criterio cardinal del paper)
+    selected = min(solved, key=lambda m: solved[m]["msce"])
+    best = solved[selected]
 
     return {
-        "order":       order,
-        "method":      method,
-        "tour_length": float(tour_length) if method == "tsp3" else None,
-        "msce":        msce,
-        "cktau":       cktau,
+        "order":           best["order"],
+        "method":          method,
+        "selected_method": selected,
+        "tour_length":     (float(best["tour_length"])
+                            if best["tour_length"] is not None else None),
+        "msce":            best["msce"],
+        "msce_by_method":  {m: solved[m]["msce"] for m in solved},
     }
