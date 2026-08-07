@@ -454,6 +454,103 @@ def circular_correlation_trimmed(
     return num / den if den > 0.0 else 0.0
 
 
+def circular_regression_rho(
+    predicted:      np.ndarray,
+    true:           np.ndarray,
+    period:         float = PERIOD_HOURS,
+    try_reflection: bool  = True,
+) -> float:
+    """
+    Bondad de ajuste **rho** de una **regresion circular-circular**, la
+    metrica que usa el paper CIRCUST (Larriba et al. 2023) para validar el
+    babuino (main, p.12; Supp Tabla A y Fig C). Alli rho se define como "un
+    analogo de la suma de cuadrados residual de una regresion lineal", calculado
+    con el paquete R ``circular`` (``lm.circular(type="c-c")``, Fisher 1993 [43],
+    Adzhar 2011 [44]). Esta es una reimplementacion **en Python sin dependencia
+    de R**.
+
+    Modelo
+    ------
+    Se regresa la fase estimada ``y`` (respuesta) sobre el tiempo real ``x``
+    (covariable), ambas angulares, con el modelo de **rotacion + reflexion**
+    que es el unico grado de libertad que deja CPCA (el orden circular queda
+    definido salvo origen y sentido):
+
+        y_hat_i = mu_0 + s * x_i   (mod 2*pi),   s in {+1, -1}
+
+    Para cada ``s``, el intercepto optimo ``mu_0`` es la **media circular** de
+    los residuos ``y_i - s*x_i`` (minimiza la desviacion circular residual). Se
+    elige el ``s`` con menor desviacion residual.
+
+    Definicion de rho (coeficiente de determinacion circular)
+    --------------------------------------------------------
+    Con la desviacion circular ``D(a, b) = sum_i (1 - cos(a_i - b_i))`` como
+    analogo circular de la suma de cuadrados:
+
+        rho = 1 - D_res / D_tot
+            = 1 - sum_i (1 - cos(y_i - y_hat_i)) / sum_i (1 - cos(y_i - ybar))
+
+    donde ``ybar`` es la media circular de ``y``. Equivalentemente, con
+    ``Rbar`` la longitud resultante media (:func:`mean_resultant_length`):
+
+        rho = 1 - (1 - Rbar_residuos) / (1 - Rbar_y)
+
+    Interpretacion y robustez
+    -------------------------
+    - ``rho -> 1``: los puntos caen sobre la diagonal de la regresion (orden
+      recuperado). ``rho ~ 0``: no mejor que predecir la fase media constante.
+    - **Es robusta al muestreo equiespaciado** (a diferencia del CCC de
+      Jammalamadaka, :func:`circular_correlation`): ``D_res`` solo depende de
+      los **residuos** del modelo ajustado, no de la concentracion marginal de
+      ``x`` ni de ``y``. Por eso el paper la usa justamente para el babuino,
+      cuyo ZT es uniforme. En ese regimen (``y`` tambien ~uniforme,
+      ``Rbar_y ~ 0``) se reduce a ``rho ~ Rbar_residuos``, que es lo que
+      ``lm.circular`` reporta como bondad de ajuste, asi que los valores son
+      comparables a su Tabla A.
+
+    Parameters
+    ----------
+    predicted, true
+        Fases en horas. ``predicted`` = fase estimada (respuesta ``y``),
+        ``true`` = tiempo real / ZT (covariable ``x``).
+    period
+        Periodo del ritmo, en horas (24 por defecto).
+    try_reflection
+        Si ``True`` (defecto), prueba ambos sentidos de giro y se queda con el
+        mejor ajuste. CIRCUST puede invertir la direccion segun ARNTL/DBP.
+
+    Returns
+    -------
+    float
+        ``rho`` en ``(-inf, 1]`` (tipicamente ``[0, 1]``; valores negativos
+        indican un orden peor que la fase media constante).
+    """
+    predicted = np.asarray(predicted, dtype=np.float64)
+    true      = np.asarray(true,      dtype=np.float64)
+
+    two_pi = 2.0 * np.pi
+    y = (two_pi * predicted / period) % two_pi   # respuesta
+    x = (two_pi * true      / period) % two_pi   # covariable
+
+    # Desviacion total: respuesta alrededor de su media circular
+    ybar  = np.arctan2(np.sin(y).sum(), np.cos(y).sum())
+    d_tot = float((1.0 - np.cos(y - ybar)).sum())
+    if d_tot <= 0.0:
+        return float("nan")
+
+    signs = (1.0, -1.0) if try_reflection else (1.0,)
+    d_res = np.inf
+    for s in signs:
+        resid = y - s * x
+        # intercepto optimo = media circular de los residuos
+        mu0   = np.arctan2(np.sin(resid).sum(), np.cos(resid).sum())
+        d_s   = float((1.0 - np.cos(resid - mu0)).sum())
+        if d_s < d_res:
+            d_res = d_s
+
+    return 1.0 - d_res / d_tot
+
+
 # ===========================================================================
 # RRE / CRE — metricas a nivel de matrices ajustadas FMM (Larriba 2019)
 # ===========================================================================
@@ -657,11 +754,24 @@ def evaluate_all(
     Returns
     -------
     dict con claves:
-        - ``MedAE``, ``SDAE``, ``AUC``, ``CCC``, ``rTrim``
+        - ``MedAE``, ``SDAE``, ``AUC``        (error, en horas)
+        - ``rho``                             (concordancia, recomendada)
+        - ``CCC``, ``rTrim``                  (concordancia, ver aviso)
         - ``pct_within_Xh`` para cada umbral
         - ``R_bar_true``, ``R_bar_pred``   (diagnostico de estabilidad)
         - ``n``                              (numero de muestras evaluadas)
         - ``delta``, ``sign``, ``mad``       (solo si ``align=True``)
+
+    Aviso sobre la medida de concordancia
+    -------------------------------------
+    Usar ``rho`` (:func:`circular_regression_rho`) y no ``CCC``. El CCC de
+    Jammalamadaka centra cada marginal en su direccion media, que queda
+    **indeterminada** cuando las fases se reparten de forma uniforme sobre
+    el ciclo. Con ``R_bar_true`` proxima a 0 su valor es arbitrario: se han
+    observado valores en torno a ``-0,9`` sobre reconstrucciones con un
+    error mediano de 30 minutos. ``rho`` solo depende de los residuos del
+    ajuste de rotacion y reflexion, de modo que se mantiene valida en ese
+    regimen, que es el de todo diseno de muestreo equiespaciado.
     """
     if align:
         alig = align_phases_by_mad(predicted, true, period=period)
@@ -675,6 +785,20 @@ def evaluate_all(
         "MedAE":      median_absolute_error(pred, true_a, period),
         "SDAE":       std_absolute_error(pred, true_a, period),
         "AUC":        auc_error_cdf(pred, true_a, period),
+        # Medida de concordancia recomendada. A diferencia del CCC, rho no
+        # se apoya en la direccion media de las marginales, de modo que
+        # sigue siendo valida cuando las fases verdaderas son uniformes
+        # sobre el ciclo (Rbar ~ 0), que es justo el caso de los disenos de
+        # muestreo equiespaciado y del ZT del babuino. Ver la nota sobre
+        # degeneracion del CCC mas abajo.
+        "rho":        circular_regression_rho(pred, true_a, period),
+        # CCC y rTrim se conservan por continuidad con analisis previos,
+        # pero DEGENERAN cuando ``R_bar_true`` es proxima a 0: al anularse
+        # la resultante media, la direccion media que centra el coeficiente
+        # queda indeterminada y el valor resultante es arbitrario. En ese
+        # regimen se han observado valores fuertemente negativos con
+        # reconstrucciones casi perfectas. No usarlos como criterio sin
+        # comprobar antes ``R_bar_true``.
         "CCC":        circular_correlation(pred, true_a, period),
         "rTrim":      circular_correlation_trimmed(pred, true_a, period),
         "R_bar_true": mean_resultant_length(true_a, period),

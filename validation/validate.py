@@ -88,6 +88,7 @@ from metrics import (
     circular_abs_diff,
     circular_correlation,
     circular_correlation_trimmed,
+    circular_regression_rho,
     cre,
     mean_resultant_length,
     median_absolute_error,
@@ -356,6 +357,10 @@ def main() -> None:
     rtrim      = circular_correlation_trimmed(
         aligned, true_arr, PERIOD_HOURS, trim_fraction=args.trim_fraction,
     )
+    # rho de regresion circular-circular (metrica del paper para babuino):
+    # robusta al muestreo equiespaciado. Se ajusta sobre la prediccion cruda
+    # porque la regresion incorpora su propia rotacion + reflexion.
+    rho_cc     = circular_regression_rho    (pred_arr, true_arr, PERIOD_HOURS)
     pct1       = pct_within                 (aligned, true_arr, 1.0, PERIOD_HOURS)
     pct2       = pct_within                 (aligned, true_arr, 2.0, PERIOD_HOURS)
     r_bar_true = mean_resultant_length      (true_arr, PERIOD_HOURS)
@@ -408,6 +413,7 @@ def main() -> None:
         "AUC":               auc,
         "CCC":               ccc,
         "rTrim":             rtrim,
+        "rho_cc":            rho_cc,
         "CRE":               cre_value,
         "n_top_genes_CRE":   n_top_used,
         "pct_within_1h":     pct1,
@@ -448,6 +454,7 @@ def main() -> None:
     print(f"    CCC             = {ccc:+7.3f}  "
           f"[R_bar(true)={r_bar_true:.3f} → {_ccc_reliability(r_bar_true)}]")
     print(f"    rTrim (δ={args.trim_fraction:.2f}) = {rtrim:+7.3f}")
+    print(f"    rho (reg c-c)   = {rho_cc:+7.3f}  (robusta a ZT equiespaciado)")
     print(f"    % within 1h     = {pct1:6.1f}%")
     print(f"    % within 2h     = {pct2:6.1f}%")
     print(f"  ── Alineacion ────────────────────────────────────────")
