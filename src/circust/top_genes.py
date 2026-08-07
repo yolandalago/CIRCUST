@@ -38,7 +38,6 @@ from math import pi
 from circust.fitting.ori import ORIModel
 from circust.fitting.fmm            import FMMModel
 from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
-from circust.fitting.cosinor import CosinorModel
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -107,9 +106,20 @@ def assign_sectors(
     return sectors
 
 
-def sector_boundaries(reference: float, n_sectors: int = 8) -> np.ndarray:
+def sector_centres(reference: float, n_sectors: int = 8) -> np.ndarray:
     """
-    Devuelve los *n_sectors* puntos centrales de sector.
+    Centros angulares de los sectores definidos por :func:`assign_sectors`.
+
+    La indexacion es la que cabe esperar: ``sector_centres(ref, n)[L - 1]`` es
+    el centro del sector cuya etiqueta es ``L`` en {1, ..., n}. La version
+    anterior devolvia las fronteras inferiores y con las etiquetas desplazadas
+    en una posicion, de modo que el centro asociado a la etiqueta ``L`` no
+    coincidia con el elemento ``L - 1``.
+
+    Deduccion: ``assign_sectors`` asigna la etiqueta ``L = n - floor(r / w)``
+    con ``r = (pico - ref) mod 2pi`` y ``w = 2pi/n``, de manera que la etiqueta
+    ``L`` cubre ``r`` en ``[(n - L) w, (n - L + 1) w)`` y su centro esta en
+    ``ref + (n - L + 1/2) w``.
 
     Parameters
     ----------
@@ -118,11 +128,12 @@ def sector_boundaries(reference: float, n_sectors: int = 8) -> np.ndarray:
 
     Returns
     -------
-    array (n_sectors,) — centros de cada sector en [0, 2pi).
+    array (n_sectors,) — centro del sector ``L`` en la posicion ``L - 1``.
     """
+    width = 2.0 * pi / n_sectors
     return np.array([
-        (reference - k * pi / (n_sectors / 2)) % (2.0 * pi)
-        for k in range(n_sectors)
+        (reference + (n_sectors - L + 0.5) * width) % (2.0 * pi)
+        for L in range(1, n_sectors + 1)
     ])
 
 
@@ -150,11 +161,16 @@ def _fit_fmm_one(
     alpha_grid: int,
     omega_grid: int,
     num_reps: int,
-) -> tuple[float, float, float, np.ndarray]:
-    """Ajusta FMM base a un unico gen. Devuelve (peak_time, omega, r2, fitted).
+) -> tuple[float, float, float, float]:
+    """Ajusta FMM base a un unico gen. Devuelve ``(peak_time, omega, r2, A)``.
 
     Funcion pura a nivel de modulo para que ``joblib`` pueda serializarla
     hacia procesos worker (FMM base puede paralelizar con muchos genes).
+
+    Devuelve escalares y no el vector ``fitted``: este ultimo no lo consume
+    nadie y, con decenas de miles de genes, obliga a serializar de vuelta un
+    vector de n muestras por gen desde cada proceso worker. La amplitud, en
+    cambio, es necesaria para construir el atlas.
     """
     model = FMMModel(
         length_alpha_grid=alpha_grid,
@@ -162,21 +178,20 @@ def _fit_fmm_one(
         num_reps=num_reps,
     )
     fr = model.fit(row, circ)
-    return fr.peak_time, fr.params["omega"], fr.r2, fr.fitted
+    return fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"]
 
 
 def _fit_fmm_one_stab(
     row:      np.ndarray,
     circ:     np.ndarray,
     stab_model: StabilizedFMMModel,
-) -> tuple[float, float, float, np.ndarray]:
+) -> tuple[float, float, float, float]:
     """Ajusta FMM estabilizado reusando un ``StabilizedFMMModel`` ya preparado.
 
-    No se paraleliza: el fit es ~1ms por gen y serializar ``prepared`` (que
-    contiene matrices grandes) entre workers seria mas costoso.
+    Mismo formato de salida que :func:`_fit_fmm_one`.
     """
     fr = stab_model.fit(row, circ)
-    return fr.peak_time, fr.params["omega"], fr.r2, fr.fitted
+    return fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -213,9 +228,6 @@ class TopGeneResult:
         Matriz de expresion de los genes TOP (en el orden circular
         preliminar). Equivale a [X_TOP] del paper.
 
-    cosinor_peaks : np.ndarray (n_top,)
-        Acrofases Cosinor de cada gen TOP.
-
     circular_scale : np.ndarray (n_muestras,)
         Eje temporal circular del ordenamiento preliminar.
 
@@ -223,6 +235,12 @@ class TopGeneResult:
         Genes semilla que fueron forzados (no pasaron los filtros
         por si solos). Se excluyen del pool de muestreo aleatorio
         en ``RandomSelector``.
+
+    coverage_genes : list[str]
+        Genes incorporados unicamente para que ningun sector circular quedase
+        vacio, con el umbral de R2_FMM relajado. Se excluyen tambien del pool
+        de muestreo aleatorio: al no alcanzar el R2 minimo harian fallar el
+        criterio de calidad de la etapa 5 en cuanto entrasen en una extraccion.
 
     sample_order : np.ndarray int (n_muestras,)
         Orden de muestras del sincronizado preliminar.
@@ -253,9 +271,9 @@ class TopGeneResult:
     sector_labels:    np.ndarray    = field(default_factory=lambda: np.array([], dtype=int))
     sector_centres:   np.ndarray    = field(default_factory=lambda: np.zeros(4))
     candidate_matrix: pd.DataFrame  = field(default_factory=pd.DataFrame)
-    cosinor_peaks:    np.ndarray    = field(default_factory=lambda: np.array([]))
     circular_scale:   np.ndarray    = field(default_factory=lambda: np.array([]))
     added_genes:      list          = field(default_factory=list)
+    coverage_genes:   list          = field(default_factory=list)
     sample_order:     np.ndarray    = field(default_factory=lambda: np.array([], dtype=int))
 
     # Diagnostico
@@ -318,8 +336,18 @@ class TopGeneSelector:
         Paper: 0.1.
 
     n_sectors : int
-        Numero de sectores circulares para verificar cobertura de picos.
-        Paper: 4 (cuadrantes).
+        Numero de sectores circulares en los que se divide la circunferencia,
+        con origen en la mediana circular de los picos, para imponer la
+        cobertura uniforme. Paper: 4 (cuadrantes). Ningun sector puede quedar
+        vacio: si lo esta, se rellena con el gen de mayor R2_FMM de ese sector
+        entre los que cumplen omega > omega_min.
+
+    top_fraction : float | None
+        Porcentaje prefijado de genes que forman el conjunto TOP, expresado
+        como fraccion en (0, 1]. Se seleccionan los de mayor R2_FMM repartidos
+        entre los sectores para preservar la cobertura circular. Si es None
+        (defecto) se conservan todos los genes que superan los filtros, sin
+        aplicar cuota.
 
     fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps : int
         Parametros de la rejilla de ajuste FMM.
@@ -338,6 +366,7 @@ class TopGeneSelector:
         r2_fmm_threshold:      float = 0.5,
         omega_min:             float = 0.1,
         n_sectors:             int   = 4,
+        top_fraction:          Optional[float] = None,
         fmm_length_alpha_grid: int   = 48,
         fmm_length_omega_grid: int   = 24,
         fmm_num_reps:          int   = 3,
@@ -353,6 +382,11 @@ class TopGeneSelector:
         self.r2_fmm_threshold      = r2_fmm_threshold
         self.omega_min             = omega_min
         self.n_sectors             = n_sectors
+        if top_fraction is not None and not (0.0 < top_fraction <= 1.0):
+            raise ValueError(
+                f"top_fraction debe estar en (0, 1], recibido: {top_fraction!r}"
+            )
+        self.top_fraction          = top_fraction
         self.fmm_length_alpha_grid = fmm_length_alpha_grid
         self.fmm_length_omega_grid = fmm_length_omega_grid
         self.fmm_num_reps          = fmm_num_reps
@@ -427,7 +461,7 @@ class TopGeneSelector:
             f"  Filtro R2_ORI >= {self.r2_ori_threshold} ..."
         )
 
-        mask_ori     = r2_ori >= self.r2_ori_threshold
+        mask_ori     = r2_ori >= self.r2_ori_threshold      # criterio: R2_ORI >= tau_ORI
         surv_genes   = [g for g, m in zip(gene_names, mask_ori) if m]
         surv_r2_ori  = r2_ori[mask_ori]
         n_after_ori  = len(surv_genes)
@@ -447,17 +481,32 @@ class TopGeneSelector:
         fmm_omega_all = np.array([r[1] for r in fmm_results])
         fmm_r2_all    = np.array([r[2] for r in fmm_results])
 
-        # ── 4. Filtro FMM: omega > min Y R2_FMM > umbral ──────────────
+        # ── 4. Filtro FMM: omega > min Y R2_FMM >= umbral ─────────────
         mask_fmm = (
             (fmm_omega_all > self.omega_min)
-            & (fmm_r2_all > self.r2_fmm_threshold)
+            & (fmm_r2_all >= self.r2_fmm_threshold)
         )
         n_after_fmm = int(mask_fmm.sum())
 
         self._log(
             f"  Filtro FMM (omega>{self.omega_min}, "
-            f"R2>{self.r2_fmm_threshold}): {n_after_fmm} supervivientes"
+            f"R2>={self.r2_fmm_threshold}): {n_after_fmm} supervivientes"
         )
+
+        # ── 4b. Cobertura circular y cuota por porcentaje ──────────────
+        # Los tres criterios que definen el conjunto TOP son: R2_FMM alto,
+        # perfil no spiked (omega > 0.1) y picos t_U que cubren de forma
+        # aproximadamente uniforme la circunferencia. Los dos primeros son los
+        # filtros anteriores; el tercero se impone aqui dividiendo el circulo en
+        # ``n_sectors`` sectores con origen en la mediana circular de los picos
+        # estimados y exigiendo que ninguno quede vacio. La cuota
+        # ``top_fraction`` selecciona despues el porcentaje prefijado de genes
+        # con mayor R2_FMM, repartido entre sectores para no romper la
+        # cobertura recien impuesta.
+        sel_idx, cov_idx = self._select_top_indices(
+            fmm_peaks_all, fmm_omega_all, fmm_r2_all, mask_fmm,
+        )
+        coverage_names = [surv_genes[i] for i in cov_idx]
 
         # Acumular genes aceptados
         acc_names:   list[str]        = []
@@ -467,14 +516,13 @@ class TopGeneSelector:
         acc_peaks:   list[float]      = []
         acc_rows:    list[np.ndarray] = []
 
-        for i, gene in enumerate(surv_genes):
-            if mask_fmm[i]:
-                acc_names.append(gene)
-                acc_r2_ori.append(float(surv_r2_ori[i]))
-                acc_r2_fmm.append(float(fmm_r2_all[i]))
-                acc_omega.append(float(fmm_omega_all[i]))
-                acc_peaks.append(float(fmm_peaks_all[i]))
-                acc_rows.append(surv_rows[i])
+        for i in sel_idx:
+            acc_names.append(surv_genes[i])
+            acc_r2_ori.append(float(surv_r2_ori[i]))
+            acc_r2_fmm.append(float(fmm_r2_all[i]))
+            acc_omega.append(float(fmm_omega_all[i]))
+            acc_peaks.append(float(fmm_peaks_all[i]))
+            acc_rows.append(surv_rows[i])
 
         # ── 5. Forzar genes core (semilla) ────────────────────────────
         forced: list[str] = []
@@ -521,19 +569,12 @@ class TopGeneSelector:
         n_top = len(acc_names)
         self._log(f"  Genes TOP finales: {n_top}")
 
-        # ── 6. Acrofases Cosinor (para cuadrantes y RandomSelector) ────
-        cos_model = CosinorModel()
-        cos_peaks = np.empty(n_top, dtype=np.float64)
-        for i in range(n_top):
-            cr = cos_model.fit(acc_rows[i], circ)
-            cos_peaks[i] = cr.peak_time
-
-        # ── 7. Asignar cuadrantes ──────────────────────────────────────
+        # ── 6. Asignar cuadrantes ──────────────────────────────────────
         peaks_arr = np.array(acc_peaks)
 
         if n_top > 0:
             peak_ref = circular_median(peaks_arr)
-            centres  = sector_boundaries(peak_ref, self.n_sectors)
+            centres  = sector_centres(peak_ref, self.n_sectors)
             sectors  = assign_sectors(
                 peaks_arr, peak_ref, self.n_sectors,
             )
@@ -541,15 +582,22 @@ class TopGeneSelector:
             centres = np.zeros(self.n_sectors)
             sectors = np.array([], dtype=int)
 
+        # Verificacion final. Tras _select_top_indices ningun sector deberia
+        # estar vacio, salvo que no exista ningun gen ritmico con pico en el
+        # (caso ya avisado alli). Los genes semilla forzados pueden desplazar
+        # ligeramente la mediana circular de referencia, asi que se recomprueba.
         covered = set(sectors.tolist()) if n_top > 0 else set()
         expected = set(range(1, self.n_sectors + 1))
         missing = expected - covered
         if missing:
             self._log(
-                f"  AVISO: cuadrantes sin cobertura: {sorted(missing)}"
+                f"  AVISO: cuadrantes sin cobertura: {sorted(missing)}. "
+                "El conjunto TOP no cubre uniformemente la circunferencia, de "
+                "modo que la estructura circular del CPCA posterior puede "
+                "degradarse."
             )
 
-        # ── 8. Construir matriz TOP ────────────────────────────────────
+        # ── 7. Construir matriz TOP ────────────────────────────────────
         if n_top > 0:
             top_matrix = pd.DataFrame(
                 np.vstack(acc_rows),
@@ -568,9 +616,9 @@ class TopGeneSelector:
             sector_labels    = sectors,
             sector_centres   = centres,
             candidate_matrix = top_matrix,
-            cosinor_peaks    = cos_peaks,
             circular_scale   = circ,
             added_genes      = forced,
+            coverage_genes   = coverage_names,
             sample_order     = np.asarray(sample_order, dtype=int),
             omega            = np.array(acc_omega),
             r2_ori           = np.array(acc_r2_ori),
@@ -581,6 +629,130 @@ class TopGeneSelector:
 
         self._log(result.summary())
         return result
+
+    # ------------------------------------------------------------------
+    # Cobertura circular de los picos y cuota por porcentaje
+    # ------------------------------------------------------------------
+
+    def _select_top_indices(
+        self,
+        peaks:    np.ndarray,
+        omega:    np.ndarray,
+        r2_fmm:   np.ndarray,
+        mask_fmm: np.ndarray,
+    ) -> np.ndarray:
+        """Indices del conjunto TOP tras imponer cobertura circular y cuota.
+
+        Parte de los genes que superan los filtros FMM (``mask_fmm``) y aplica,
+        en este orden:
+
+        1. **Cobertura circular.** Se divide la circunferencia en
+           ``n_sectors`` sectores tomando como origen la mediana circular de
+           los picos ``t_U`` de los genes filtrados. Si algun sector queda
+           vacio, se rellena con el gen de mayor ``R2_FMM`` cuyo pico caiga en
+           el, entre los que cumplen ``omega > omega_min``. Es decir, se relaja
+           unicamente el umbral de ``R2_FMM``, nunca el criterio de perfil no
+           spiked. Un sector solo puede quedar vacio si ningun gen ritmico tiene
+           su pico en el, situacion que se avisa por consola.
+
+        2. **Cuota por porcentaje.** Si ``top_fraction`` no es None, se retiene
+           esa fraccion de los genes, repartida proporcionalmente entre los
+           sectores no vacios y ordenando por ``R2_FMM`` descendente dentro de
+           cada uno. El reparto por sectores, y no global, evita que la cuota
+           deshaga la cobertura que acaba de imponerse: un ranking global por
+           ``R2_FMM`` tiende a concentrarse en la region del ciclo donde la
+           señal es mas fuerte.
+
+        Returns
+        -------
+        np.ndarray de int : indices (sobre los supervivientes del filtro ORI)
+        que forman el conjunto TOP, en orden creciente, y los indices de los
+        genes que han entrado unicamente por la regla de cobertura, que se
+        excluyen despues del muestreo aleatorio de la etapa 5 por haber
+        entrado con el umbral de R2 relajado.
+        """
+        sel = np.flatnonzero(mask_fmm)
+        cov: list[int] = []
+        if sel.size == 0:
+            self._log("  AVISO: ningun gen supera los filtros FMM.")
+            return sel, np.array([], dtype=int)
+
+        n_sec = self.n_sectors
+
+        # Origen de los sectores: mediana circular de los picos filtrados
+        peak_ref = circular_median(peaks[sel])
+        sectors  = assign_sectors(peaks, peak_ref, n_sec)
+
+        # ── 1. Cobertura: ningun sector puede quedar vacio ────────────────
+        keep = set(sel.tolist())
+        pool = np.flatnonzero(omega > self.omega_min)     # se relaja solo R2_FMM
+        for s in range(1, n_sec + 1):
+            if np.any(sectors[sel] == s):
+                continue
+            cand = pool[sectors[pool] == s]
+            if cand.size == 0:
+                self._log(
+                    f"  AVISO: el sector {s} no contiene ningun gen con "
+                    f"omega>{self.omega_min}; no puede cubrirse."
+                )
+                continue
+            best = int(cand[int(np.argmax(r2_fmm[cand]))])
+            keep.add(best)
+            cov.append(best)
+            self._log(
+                f"  Cobertura: sector {s} vacio, se incorpora el gen de mayor "
+                f"R2_FMM del sector (R2={r2_fmm[best]:.3f}, "
+                f"omega={omega[best]:.3f})"
+            )
+        sel = np.array(sorted(keep), dtype=int)
+
+        # ── 2. Cuota por porcentaje, estratificada por sector ─────────────
+        cov_arr = np.array(sorted(cov), dtype=int)
+        if self.top_fraction is None:
+            return sel, cov_arr
+
+        n_target = int(np.ceil(self.top_fraction * sel.size))
+        if n_target >= sel.size:
+            return sel, cov_arr
+
+        by_sector = {
+            s: sel[sectors[sel] == s] for s in range(1, n_sec + 1)
+        }
+        by_sector = {s: idx for s, idx in by_sector.items() if idx.size > 0}
+
+        # Reparto proporcional al tamano de cada sector, con al menos un gen
+        # por sector no vacio para no perder la cobertura.
+        n_sec_used = len(by_sector)
+        quota = {s: max(1, int(np.floor(n_target * idx.size / sel.size)))
+                 for s, idx in by_sector.items()}
+        # Ajuste de redondeo: reparte o retira las plazas sobrantes por sector
+        # de mayor a menor tamano, sin bajar de una plaza.
+        orden = sorted(by_sector, key=lambda s: -by_sector[s].size)
+        while sum(quota.values()) != n_target and n_target >= n_sec_used:
+            delta = 1 if sum(quota.values()) < n_target else -1
+            movido = False
+            for s in orden:
+                if delta > 0 and quota[s] < by_sector[s].size:
+                    quota[s] += 1; movido = True
+                elif delta < 0 and quota[s] > 1:
+                    quota[s] -= 1; movido = True
+                if movido and sum(quota.values()) == n_target:
+                    break
+            if not movido:
+                break
+
+        chosen: list[int] = []
+        for s, idx in by_sector.items():
+            top = idx[np.argsort(-r2_fmm[idx], kind="stable")][: quota[s]]
+            chosen.extend(top.tolist())
+
+        self._log(
+            f"  Cuota top_fraction={self.top_fraction:g}: "
+            f"{len(chosen)}/{sel.size} genes retenidos "
+            f"(por sector: { {s: int(quota[s]) for s in sorted(quota)} })"
+        )
+        chosen_arr = np.array(sorted(chosen), dtype=int)
+        return chosen_arr, cov_arr[np.isin(cov_arr, chosen_arr)]
 
     # ------------------------------------------------------------------
     # Ajuste ORI en lote (paralelo)

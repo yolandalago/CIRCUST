@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -192,13 +193,43 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
     parser.add_argument(
         "--robust-method", choices=["best_k", "aggregate"], default="best_k",
         help="Como se elige el orden final entre las K repeticiones: "
-             "'best_k' (mejor por R2 mediano) o 'aggregate' (TSP3/HODs). "
+             "'best_k' (selecciona una repeticion) o 'aggregate' (TSP3/HODs). "
              "Por defecto: best_k.",
     )
     parser.add_argument(
-        "--aggregation", choices=["tsp3", "hods"], default="tsp3",
+        "--selection-criterion",
+        choices=["r2_median", "n_well_fitted", "medoid"], default="r2_median",
+        help="Criterio con el que se elige la repeticion. Solo aplica si "
+             "--robust-method=best_k. 'r2_median' (mediana de R2 maxima), "
+             "'n_well_fitted' (mas genes con R2 >= umbral) o 'medoid' (orden "
+             "mas representativo). Por defecto: r2_median.",
+    )
+    parser.add_argument(
+        "--selection-r2-threshold", type=float, default=0.65,
+        help="Umbral tau del criterio 'n_well_fitted'. Valor provisional 0.65, "
+             "pendiente de calibrar en el estudio de simulacion.",
+    )
+    parser.add_argument(
+        "--aggregation", choices=["auto", "tsp3", "hods"], default="auto",
         help="Metodo de agregacion de ordenes. Solo aplica si "
-             "--robust-method=aggregate. Por defecto: tsp3.",
+             "--robust-method=aggregate. Por defecto: auto (corre TSP3 y "
+             "HODs y elige el de menor MSCE).",
+    )
+    parser.add_argument(
+        "--consensus-scale", choices=["circmean", "cire"], default="circmean",
+        help="Como se construye la escala circular del orden consenso. Solo "
+             "aplica si --robust-method=aggregate. 'circmean' (media circular "
+             "de las K fases, mejor estimador de fase) o 'cire' (proyeccion "
+             "isotonica circular sobre el orden consenso, que garantiza "
+             "phi_o1 <= ... <= phi_on a costa de precision). Por defecto: "
+             "circmean.",
+    )
+    parser.add_argument(
+        "--top-fraction", type=float, default=None,
+        help="Porcentaje prefijado de genes que forman el conjunto TOP, como "
+             "fraccion en (0, 1]. Se toman los de mayor R2_FMM repartidos "
+             "entre los 4 sectores para preservar la cobertura circular. Por "
+             "defecto: sin cuota (todos los genes que superan los filtros).",
     )
     parser.add_argument(
         "--n-reps", type=int, default=5,
@@ -225,18 +256,6 @@ def _banner(msg: str) -> None:
     print("=" * width)
 
 
-# Columnas de robust_result.stats_table en el orden esperado.
-_STATS_COLS = [
-    "fmm_M", "fmm_A", "fmm_alpha", "fmm_beta", "fmm_omega",
-    "fmm_pkU", "fmm_pkL", "fmm_pkU_pct", "fmm_pkL_pct",
-    "fmm_s", "fmm_mse", "fmm_r2",
-    "cos_M", "cos_A", "cos_phi",
-    "cos_pk1", "cos_pk2", "cos_pk1_pct", "cos_pk2_pct",
-    "cos_s", "cos_mse", "cos_r2",
-    "np_s", "np_mse", "np_r2",
-]
-
-
 def _build_atlas(
     robust_result,
     top_result,
@@ -255,27 +274,21 @@ def _build_atlas(
     los K reps producen K orderings de muestras, y se consolida en UN
     orden consenso. Luego se ajusta FMM por gen sobre ese consenso.
 
-    - ``method="best_k"``: usa los parametros de la repeticion seleccionada
-      directamente desde ``stats_table``.
+    - ``method="best_k"``: [M^TOP] = parametros FMM **de la rep seleccionada**
+      (``robust_result.selected_fmm``), consistentes con su orden de muestras.
+      No se promedia sobre las K (eso mezclaria ordenes ya descartados por
+      peores segun el R² mediano).
     - ``method="aggregate"``: el orden consenso (TSP3/HODs sobre los K
       orderings de muestras) no coincide con ninguna rep individual, asi
       que **se re-fittea FMM por gen** sobre el orden consenso para
       obtener los parametros canonicos.
     """
-    n_top     = len(robust_result.top_gene_names)
     top_names = list(robust_result.top_gene_names)
 
     if robust_result.method_used == "best_k":
-        sel   = int(robust_result.selected_rep)
-        block = robust_result.stats_table[sel * n_top : (sel + 1) * n_top]
-        df    = pd.DataFrame(block, columns=_STATS_COLS)
-        raw   = pd.DataFrame({
-            "gene_name":      top_names,
-            "r2_fmm":         df["fmm_r2"].values,
-            "amplitude":      df["fmm_A"].values,
-            "peak_phase_rad": df["fmm_pkU"].values,
-            "omega":          df["fmm_omega"].values,
-        })
+        raw = robust_result.selected_fmm[
+            ["gene_name", "r2_fmm", "amplitude", "peak_phase_rad", "omega"]
+        ].copy()
     else:
         # Re-fittear FMM sobre el orden consenso de MUESTRAS
         top_matrix_final = top_result.candidate_matrix.iloc[
@@ -283,12 +296,23 @@ def _build_atlas(
         ]
         final_scale = np.asarray(robust_result.circular_scale, dtype=np.float64)
 
+        # El ajuste de cada gen es independiente, asi que se reparte entre
+        # procesos igual que en las etapas 3 y 4. Antes era un bucle secuencial
+        # sobre los miles de genes TOP, y con la matriz completa suponia un
+        # tercio del tiempo total del pipeline corriendo en un unico nucleo.
+        from joblib import Parallel, delayed
+        from circust.top_genes import _fit_fmm_one, _fit_fmm_one_stab
+
+        rows_mat = top_matrix_final.loc[top_names].values.astype(np.float64)
+        n_jobs   = os.cpu_count() or 1
+
         if fmm_method == "base":
-            from circust.fitting.fmm import FMMModel
-            fmm = FMMModel(
-                length_alpha_grid = cfg["fmm_alpha_grid"],
-                length_omega_grid = cfg["fmm_omega_grid"],
-                num_reps          = cfg["fmm_reps"],
+            ag, og, nr = (cfg["fmm_alpha_grid"], cfg["fmm_omega_grid"], cfg["fmm_reps"])
+            # loky (multiproceso): los argumentos por gen son pequenos y el
+            # ajuste es intensivo en CPU sin liberar el GIL.
+            fits = Parallel(n_jobs=n_jobs)(
+                delayed(_fit_fmm_one)(rows_mat[i], final_scale, ag, og, nr)
+                for i in range(len(top_names))
             )
         else:
             from circust.fitting.fmm_stabilized import (
@@ -297,21 +321,22 @@ def _build_atlas(
             stab_kwargs: dict = {}
             if cpca_result.lambda_star is not None:
                 stab_kwargs["lambda_star"] = float(cpca_result.lambda_star)
-            prepared = prepare_dataset(final_scale, **stab_kwargs)
-            fmm      = StabilizedFMMModel(prepared=prepared)
+            prepared   = prepare_dataset(final_scale, **stab_kwargs)
+            stab_model = StabilizedFMMModel(prepared=prepared)
+            # threading: los workers comparten ``prepared`` en memoria en vez
+            # de serializar sus matrices precomputadas hacia cada proceso.
+            fits = Parallel(n_jobs=n_jobs, backend="threading")(
+                delayed(_fit_fmm_one_stab)(rows_mat[i], final_scale, stab_model)
+                for i in range(len(top_names))
+            )
 
-        rows = []
-        for gene in top_names:
-            y   = top_matrix_final.loc[gene].values.astype(np.float64)
-            fit = fmm.fit(y, final_scale)
-            rows.append({
-                "gene_name":      gene,
-                "r2_fmm":         float(fit.r2),
-                "amplitude":      float(fit.params["A"]),
-                "peak_phase_rad": float(fit.peak_time),
-                "omega":          float(fit.params["omega"]),
-            })
-        raw = pd.DataFrame(rows)
+        raw = pd.DataFrame({
+            "gene_name":      list(top_names),
+            "r2_fmm":         [float(f[2]) for f in fits],
+            "amplitude":      [float(f[3]) for f in fits],
+            "peak_phase_rad": [float(f[0]) for f in fits],
+            "omega":          [float(f[1]) for f in fits],
+        })
 
     # Postprocesar: pico en horas + clasificacion day/night
     raw["peak_phase_h"]   = raw["peak_phase_rad"] * 24.0 / (2.0 * np.pi)
@@ -436,6 +461,7 @@ def main() -> None:
         r2_fmm_threshold      = 0.5,
         omega_min             = 0.1,
         n_sectors             = 4,
+        top_fraction          = args.top_fraction,
         fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
         fmm_num_reps          = cfg["fmm_reps"],
@@ -462,9 +488,11 @@ def main() -> None:
         n_reps               = args.n_reps,
         sample_size_fraction = 2.0 / 3.0,
         method               = args.robust_method,
+        selection_criterion  = args.selection_criterion,
+        selection_r2_threshold = args.selection_r2_threshold,
         aggregation_method   = args.aggregation,
+        consensus_scale_mode = args.consensus_scale,
         r2_min               = 0.5,
-        max_attempts         = 5000,
         anchor_gene          = cfg["anchor_gene"],
         direction_gene       = cfg["direction_gene"],
         fmm_length_alpha_grid= cfg["fmm_alpha_grid"],
