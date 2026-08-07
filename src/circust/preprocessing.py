@@ -258,14 +258,27 @@ class PreprocessingResult:
         Es la matriz que consume cada paso (CPCA, FMM).
 
     expr_raw : pd.DataFrame
-        Matriz bruta filtrada despues de eliminar genes malos pero antes
-        de normalizar. Util para depuracion y validacion.
+        Matriz bruta filtrada despues de eliminar genes malos e imputar los
+        valores ausentes, pero antes de normalizar. Util para depuracion y
+        validacion.
 
     dropped_sparse : List[str]
         Simbolos genicos eliminados porque > zero_threshold de muestras eran cero o NaN.
 
     dropped_duplicates : List[str]
         Simbolos genicos eliminados durante la resolucion de duplicados (filas con menor MAD).
+
+    imputed_genes : List[str]
+        Simbolos genicos que tenian algun valor ausente y han sido imputados.
+        Estos genes superaron el filtro de dispersion, es decir, su fraccion de
+        NaN no llega al umbral, de modo que se conservan.
+
+    n_imputed_cells : int
+        Numero total de celdas imputadas en toda la matriz.
+
+    dropped_samples : list
+        Columnas descartadas por no contener ningun valor numerico. Suelen ser
+        columnas de metadatos interpretadas como muestras al cargar.
 
     n_genes_in : int
         Numero de genes que entraron al preprocesador.
@@ -281,6 +294,9 @@ class PreprocessingResult:
     expr_raw:            pd.DataFrame
     dropped_sparse:      list[str] = field(default_factory=list)
     dropped_duplicates:  list[str] = field(default_factory=list)
+    imputed_genes:       list[str] = field(default_factory=list)
+    n_imputed_cells:     int = 0
+    dropped_samples:     list      = field(default_factory=list)
     n_genes_in:          int = 0
     n_genes_out:         int = 0
     n_samples:           int = 0
@@ -294,7 +310,14 @@ class PreprocessingResult:
             f"  Muestras             : {self.n_samples}",
             f"  Eliminados (sparse)  : {len(self.dropped_sparse)}",
             f"  Eliminados (duplicados): {len(self.dropped_duplicates)}",
+            f"  Genes imputados      : {len(self.imputed_genes)} "
+            f"({self.n_imputed_cells} celda(s))",
         ]
+        if self.dropped_samples:
+            lines.append(
+                f"  Columnas descartadas : {len(self.dropped_samples)} "
+                f"{self.dropped_samples[:5]}"
+            )
         if self.dropped_sparse:
             shown = self.dropped_sparse[:5]
             tail  = f" ... (+{len(self.dropped_sparse)-5} mas)" if len(self.dropped_sparse) > 5 else ""
@@ -303,6 +326,11 @@ class PreprocessingResult:
             unique_dupes = sorted(set(self.dropped_duplicates))[:5]
             tail = f" ... (+{len(set(self.dropped_duplicates))-5} mas)" if len(set(self.dropped_duplicates)) > 5 else ""
             lines.append(f"    genes duplicados   : {unique_dupes}{tail}")
+        if self.imputed_genes:
+            shown = self.imputed_genes[:5]
+            tail  = (f" ... (+{len(self.imputed_genes)-5} mas)"
+                     if len(self.imputed_genes) > 5 else "")
+            lines.append(f"    genes imputados    : {shown}{tail}")
         return "\n".join(lines)
 
 
@@ -316,6 +344,23 @@ def normalise_matrix(
 
     Filas constantes (min == max) se mapean a todos ceros.
 
+    Tratamiento de valores ausentes
+    -------------------------------
+    El minimo y el maximo se calculan con ``nanmin`` y ``nanmax``, es decir,
+    sobre los valores observados de cada gen. Con ``min`` y ``max`` propagantes
+    un unico NaN en la fila convertia ``row_min`` y ``row_max`` en NaN y, a
+    traves de la division por ``span``, arrasaba las demas celdas de ese gen,
+    que eran validas. El gen sobrevivia entonces al filtro del 30 % de
+    ``Preprocessor`` y moria en este paso: con el modelo FMM base su R2 salia
+    NaN y quedaba descartado en silencio por ``r2 >= umbral``, con el
+    estabilizado se lanzaba una excepcion, y si era un gen \textit{core} el SVD
+    del CPCA no convergia. La implementacion de referencia en R arrastra el
+    mismo comportamiento en ``normalice2``.
+
+    Las celdas que ya eran NaN siguen siendolo a la salida, porque normalizar
+    no puede inventar el valor que falta. Quien decide que hacer con ellas es
+    ``Preprocessor``, que las imputa antes de llegar aqui.
+
     Parameters
     ----------
     mat : pd.DataFrame
@@ -327,13 +372,19 @@ def normalise_matrix(
     -------
     pd.DataFrame con la misma forma e indices que ``mat``.
     """
-    values  = mat.values.astype(float)
-    row_min = values.min(axis=1, keepdims=True)
-    row_max = values.max(axis=1, keepdims=True)
-    span    = row_max - row_min
+    values = mat.values.astype(float)
+
+    # Filas enteramente NaN: nanmin/nanmax emitirian un RuntimeWarning y
+    # devolverian NaN. Se tratan como filas constantes y se mapean a ceros.
+    all_nan = np.all(np.isnan(values), axis=1, keepdims=True)
+
     with np.errstate(invalid="ignore", divide="ignore"):
-        normed = np.where(
-            span == 0,
+        safe    = np.where(all_nan, 0.0, values)
+        row_min = np.nanmin(safe, axis=1, keepdims=True)
+        row_max = np.nanmax(safe, axis=1, keepdims=True)
+        span    = row_max - row_min
+        normed  = np.where(
+            (span == 0) | all_nan,
             0.0,
             (norm_max - norm_min) * ((values - row_min) / span) + norm_min,
         )
@@ -347,7 +398,14 @@ class Preprocessor:
     1. Eliminar genes sin nombre (NA rownames en R)
     2. Eliminar genes sparse (> ``sparse_threshold`` de muestras son cero O NaN)
     3. Resolver nombres de genes duplicados — conservar la fila con mayor MAD
-    4. Normalizar cada gen a [-1, 1]
+    4. Imputar los valores ausentes que quedan (``impute_strategy``)
+    5. Normalizar cada gen a [-1, 1]
+
+    El paso 4 existe porque el filtro del paso 2 tolera hasta un
+    ``sparse_threshold`` de NaN por gen, pero ni el SVD del CPCA ni el ajuste
+    del modelo FMM admiten valores ausentes. Sin el, un gen que supera el
+    filtro con un solo NaN acaba descartado en silencio o hace fallar el CPCA
+    si pertenece al conjunto \textit{core}.
 
     Parameters
     ----------
@@ -355,6 +413,19 @@ class Preprocessor:
         Fraccion de muestras que pueden ser cero o NaN antes de que un gen
         se elimine. La comparacion es estricta (>), asi que un gen
         exactamente en el umbral se conserva.
+
+    impute_strategy : str
+        Que hacer con los valores ausentes de los genes que superan el filtro
+        de dispersion.
+
+        ``"median"`` (defecto)
+            Sustituirlos por la mediana de los valores observados del gen. Se
+            usa la mediana y no la media porque es robusta a los valores
+            extremos, frecuentes en expresion genica.
+        ``"drop"``
+            Eliminar el gen entero. Equivale a exigir un 0 % de valores
+            ausentes y hace inoperante la tolerancia de ``sparse_threshold``
+            sobre los NaN.
 
     zero_threshold : float o None
         Override para el umbral solo de ceros. Si None (defecto), usa
@@ -390,6 +461,7 @@ class Preprocessor:
             sparse_threshold: float         = 0.3,
             zero_threshold:   Optional[float] = None,
             nan_threshold:    Optional[float] = None,
+            impute_strategy:  str           = "median",
             norm_min:         float         = -1.0,
             norm_max:         float         =  1.0,
             verbose:          bool          = True,
@@ -399,8 +471,14 @@ class Preprocessor:
             raise ValueError(
                 f"sparse_threshold debe estar entre 0 y 1, se recibio {sparse_threshold}"
             )
+        if impute_strategy not in ("median", "drop"):
+            raise ValueError(
+                "impute_strategy debe ser 'median' o 'drop', se recibio "
+                f"{impute_strategy!r}"
+            )
 
         self.sparse_threshold = sparse_threshold
+        self.impute_strategy  = impute_strategy
         self.zero_threshold   = zero_threshold if zero_threshold is not None else sparse_threshold
         self.nan_threshold    = nan_threshold  if nan_threshold  is not None else sparse_threshold
         self.norm_min         = norm_min
@@ -428,6 +506,10 @@ class Preprocessor:
         n_genes_in, n_samples = matrix.shape
         self._log(f"Matriz de entrada: {n_genes_in} genes x {n_samples} muestras")
 
+        # paso 0 — descartar columnas enteramente ausentes
+        matrix, dropped_cols = self._drop_empty_samples(matrix)
+        n_samples = matrix.shape[1]
+
         # paso 1 — eliminar genes sin nombre
         mat = self._drop_unnamed(matrix)
 
@@ -445,7 +527,10 @@ class Preprocessor:
         # paso 3 — resolver nombres de genes duplicados
         mat, dropped_duplicates = self._resolve_duplicates(mat)
 
-        # paso 4 — normalizar cada gen a [-1, 1]
+        # paso 4 — imputar los valores ausentes que han superado el filtro
+        mat, imputed_genes, n_imputed = self._impute_missing(mat)
+
+        # paso 5 — normalizar cada gen a [-1, 1]
         expr_norm = normalise_matrix(mat, self.norm_min, self.norm_max)
 
         result = PreprocessingResult(
@@ -453,6 +538,9 @@ class Preprocessor:
             expr_raw           = mat,
             dropped_sparse     = dropped_sparse,
             dropped_duplicates = dropped_duplicates,
+            imputed_genes      = imputed_genes,
+            n_imputed_cells    = n_imputed,
+            dropped_samples    = dropped_cols,
             n_genes_in         = n_genes_in,
             n_genes_out        = len(expr_norm),
             n_samples          = n_samples,
@@ -460,6 +548,35 @@ class Preprocessor:
 
         self._log(result.summary())
         return result
+
+    def _drop_empty_samples(
+        self, mat: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, list]:
+        """
+        Descarta las columnas cuyos valores son todos ausentes.
+
+        Una columna sin un solo valor numerico no puede ser una muestra. En la
+        practica son columnas de metadatos que ``load_expression_matrix``
+        convierte a NaN al forzar el tipo numerico, como la columna ``Symbol``
+        del CSV de babuino de Mure et al. (2018).
+
+        La comprobacion va antes que el filtro de dispersion por gen porque una
+        de estas columnas afecta a **todos** los genes a la vez con una fraccion
+        de NaN minima, de modo que ninguno supera el umbral, todos sobreviven y
+        la columna acaba colandose en el analisis como una muestra ficticia.
+        """
+        empty = mat.columns[mat.isna().all(axis=0)]
+        if len(empty) == 0:
+            return mat, []
+
+        self._log(
+            f"  Paso 0 — descartadas {len(empty)} columna(s) sin ningun valor "
+            f"numerico: {list(empty)[:5]}"
+            + (" ..." if len(empty) > 5 else "")
+            + ". Revisa si son columnas de metadatos mal interpretadas como "
+              "muestras."
+        )
+        return mat.loc[:, ~mat.columns.isin(empty)], list(empty)
 
     def _drop_unnamed(self, mat: pd.DataFrame) -> pd.DataFrame:
         """
@@ -507,10 +624,64 @@ class Preprocessor:
 
         return mat.loc[~is_sparse].copy(), dropped
 
+    def _impute_missing(
+        self, mat: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, list[str], int]:
+        """
+        Resuelve los valores ausentes de los genes que superaron el filtro
+        de dispersion.
+
+        Con ``impute_strategy="median"`` cada NaN se sustituye por la mediana de
+        los valores observados de su propio gen, de modo que la imputacion no
+        mezcla informacion entre genes ni desplaza el nivel basal del perfil.
+        Con ``"drop"`` se elimina el gen completo.
+
+        Devuelve la matriz, los genes afectados y el numero de celdas
+        imputadas.
+        """
+        na_per_gene = mat.isna().sum(axis=1)
+        affected    = na_per_gene[na_per_gene > 0]
+
+        if affected.empty:
+            self._log("  Paso 4 — sin valores ausentes que imputar")
+            return mat, [], 0
+
+        genes     = affected.index.tolist()
+        n_imputed = int(affected.sum())
+
+        if self.impute_strategy == "drop":
+            self._log(
+                f"  Paso 4 — eliminados {len(genes)} gen(es) con algun valor "
+                f"ausente (impute_strategy='drop')"
+            )
+            return mat.loc[na_per_gene == 0].copy(), genes, 0
+
+        # Mediana por gen sobre los valores observados. Se opera sobre el array
+        # y no con ``fillna``, que exigiria transponer y realinear por etiqueta
+        # con decenas de miles de genes.
+        values = mat.values.astype(float)
+        mask   = np.isnan(values)
+        with np.errstate(invalid="ignore"):
+            medians = np.nanmedian(np.where(mask.all(axis=1, keepdims=True), 0.0, values),
+                                   axis=1, keepdims=True)
+        values[mask] = np.broadcast_to(medians, values.shape)[mask]
+        filled = pd.DataFrame(values, index=mat.index, columns=mat.columns)
+
+        self._log(
+            f"  Paso 4 — imputadas {n_imputed} celda(s) en {len(genes)} gen(es) "
+            f"con la mediana del gen"
+        )
+        return filled, genes, n_imputed
+
     def _resolve_duplicates(self, mat: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         """
         Para cada nombre de gen que aparece mas de una vez, conserva la fila
         con mayor MAD y descarta el resto.
+
+        El MAD se calcula con ``nan_policy="omit"``. Con la politica por
+        defecto, ``propagate``, una fila con algun valor ausente daba MAD igual
+        a NaN y ``np.argmax`` devuelve la posicion del primer NaN, de modo que
+        entre dos filas homonimas se conservaba precisamente la incompleta.
         """
         # encontrar nombres de genes que aparecen mas de una vez
         duplicated_mask  = mat.index.duplicated(keep=False)
@@ -530,15 +701,15 @@ class Preprocessor:
         dropped_names: list[str] = []
 
         for gene in duplicated_names:
-            # np.where da posiciones enteras — necesario porque dos filas
+            # np.where da posiciones enteras necesario porque dos filas
             # comparten la misma etiqueta, asi que .loc devolveria ambas
             positions = np.where(mat.index == gene)[0]
 
-            # calcular MAD para cada fila duplicada usando scale=1 para replicar R, con default seria "1.482"
             mads = np.array([
-                float(median_abs_deviation(mat.iloc[pos].values, scale=1))
+                float(median_abs_deviation(mat.iloc[pos].values, nan_policy="omit"))
                 for pos in positions
             ])
+            mads = np.nan_to_num(mads, nan=-np.inf)   # fila totalmente NaN: la ultima opcion
 
             # conservar la fila con mayor MAD, eliminar el resto
             best_position   = positions[int(np.argmax(mads))]
