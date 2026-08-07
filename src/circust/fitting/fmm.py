@@ -193,6 +193,125 @@ def _step1(
     return np.array([M_est, A_est, alpha, beta_est, omega, rss])
 
 
+@njit(cache=True, fastmath=True)
+def _step1_grid_jit(
+    alpha_grid: np.ndarray,
+    omega_grid: np.ndarray,
+    data:       np.ndarray,
+    t:          np.ndarray,
+    out:        np.ndarray,
+) -> None:
+    """Paso 1 vectorizado, compilado y sin tensores intermedios.
+
+    Escribe en ``out`` una fila ``[M, A, alpha, beta, omega, RSS]`` por punto
+    de la rejilla, con el mismo layout que ``_step1`` escalar.
+
+    Dos ideas evitan casi todo el trabajo de la version con NumPy puro.
+
+    La primera es que ``tan((t - alpha)/2)`` depende solo de ``(alpha, t)`` y no
+    de ``omega``, de modo que basta con calcular ``sin`` y ``cos`` de
+    ``u = (t - alpha)/2`` una vez por cada ``alpha``, en lugar de una vez por
+    cada par ``(alpha, omega)``. La segunda es que la fase de Mobius no hace
+    falta evaluarla: por la identidad del angulo doble, con
+    ``phi = 2 arctan(omega tan u)`` se tiene
+
+        cos(phi) = (cos^2 u - omega^2 sin^2 u) / (cos^2 u + omega^2 sin^2 u),
+        sin(phi) = 2 omega sin u cos u       / (cos^2 u + omega^2 sin^2 u),
+
+    de manera que los regresores ``cos(alpha + phi)`` y ``sin(alpha + phi)`` se
+    obtienen con las formulas de adicion y sin una sola llamada a ``tan``,
+    ``arctan``, ``cos`` o ``sin`` dentro del bucle sobre ``omega``. El
+    denominador es una suma de cuadrados, siempre positivo, asi que ademas
+    desaparece la singularidad en ``t = alpha + pi``.
+
+    Los valores ajustados se obtienen como ``M + b*xx + g*zz``, que es
+    algebraicamente identico a ``M + A cos(beta + phi)`` por construccion de la
+    reparametrizacion lineal, y ahorra otra pasada trigonometrica.
+    """
+    An = alpha_grid.shape[0]
+    Wn = omega_grid.shape[0]
+    N  = t.shape[0]
+    two_pi = 2.0 * np.pi
+
+    ybar = 0.0
+    for i in range(N):
+        ybar += data[i]
+    ybar /= N
+
+    s_u  = np.empty(N)
+    c_u  = np.empty(N)
+    xbuf = np.empty(N)
+    zbuf = np.empty(N)
+
+    for ia in range(An):
+        alpha = alpha_grid[ia]
+        ca = np.cos(alpha)
+        sa = np.sin(alpha)
+        # Un unico seno y coseno por (alpha, muestra), reutilizados en todos los omega
+        for i in range(N):
+            u = 0.5 * (t[i] - alpha)
+            s_u[i] = np.sin(u)
+            c_u[i] = np.cos(u)
+
+        for iw in range(Wn):
+            omega = omega_grid[iw]
+            o2 = omega * omega
+
+            sx = 0.0
+            sz = 0.0
+            for i in range(N):
+                s = s_u[i]
+                c = c_u[i]
+                cc = c * c
+                ss = s * s
+                den = cc + o2 * ss
+                Cm  = (cc - o2 * ss) / den
+                Sm  = (2.0 * omega * s * c) / den
+                x = ca * Cm - sa * Sm          # cos(alpha + phi)
+                z = sa * Cm + ca * Sm          # sin(alpha + phi)
+                xbuf[i] = x
+                zbuf[i] = z
+                sx += x
+                sz += z
+            xbar = sx / N
+            zbar = sz / N
+
+            sxx = 0.0; sxz = 0.0; szz = 0.0; sxy = 0.0; szy = 0.0
+            for i in range(N):
+                xc = xbuf[i] - xbar
+                zc = zbuf[i] - zbar
+                yc = data[i] - ybar
+                sxx += xc * xc
+                sxz += xc * zc
+                szz += zc * zc
+                sxy += xc * yc
+                szy += zc * yc
+
+            det = sxx * szz - sxz * sxz
+            if abs(det) < 1e-12:
+                det = 1e-12
+            b = (szz * sxy - sxz * szy) / det
+            g = (sxx * szy - sxz * sxy) / det
+            M = ybar - b * xbar - g * zbar
+
+            rss = 0.0
+            for i in range(N):
+                d = M + b * xbuf[i] + g * zbuf[i] - data[i]
+                rss += d * d
+            rss /= N
+
+            A_est = np.sqrt(b * b + g * g)
+            beta  = (np.arctan2(-g, b) + alpha) % two_pi
+
+            row = ia * Wn + iw
+            out[row, 0] = M
+            out[row, 1] = A_est
+            out[row, 2] = alpha
+            out[row, 3] = beta
+            out[row, 4] = omega
+            out[row, 5] = rss
+
+
 def _step1_grid(
     alpha_grid: np.ndarray,
     omega_grid: np.ndarray,
@@ -202,8 +321,10 @@ def _step1_grid(
     """
     Paso 1 vectorizado: evalua TODOS los puntos (alpha, omega) simultaneamente.
 
-    Reemplaza el bucle ``for`` de Python sobre la rejilla con una sola pasada
-    de operaciones NumPy, obteniendo una aceleracion de ~3x.
+    Si Numba esta disponible se delega en ``_step1_grid_jit``, que evita tanto
+    los tensores intermedios de forma ``(A, W, N)`` como las llamadas
+    trigonometricas repetidas para cada omega. Si no, se usa la version con
+    NumPy puro que hay a continuacion, de semantica identica.
 
     Estrategia
     ----------
@@ -227,6 +348,17 @@ def _step1_grid(
     """
     An, Wn, N = len(alpha_grid), len(omega_grid), len(t)
     AW = An * Wn
+
+    if _HAS_NUMBA:
+        out = np.empty((AW, 6), dtype=np.float64)
+        _step1_grid_jit(
+            np.ascontiguousarray(alpha_grid, dtype=np.float64),
+            np.ascontiguousarray(omega_grid, dtype=np.float64),
+            np.ascontiguousarray(data,       dtype=np.float64),
+            np.ascontiguousarray(t,          dtype=np.float64),
+            out,
+        )
+        return out
 
     # ── Broadcasting de toda la trigonometria: formas (A, W, N) ─────────
     alpha_b = alpha_grid[:, None, None]   # (A, 1, 1)
@@ -591,6 +723,12 @@ class FMMModel(RhythmModel):
                 self.length_omega_grid,
             )
         )
+        # Pasos de las rejillas iniciales. Se propagan de una iteracion a la
+        # siguiente para poder estrechar las rejillas sin tener que deducir el
+        # paso de una rejilla ya envuelta a [0, 2*pi) (ver _refine_alpha_grid).
+        alpha_step = (2 * np.pi) / self.length_alpha_grid
+        omega_step = (float(np.mean(np.diff(omega_grid)))
+                      if self.length_omega_grid > 1 else self.omega_max)
 
         best_par  = None
         par_final = None
@@ -658,11 +796,11 @@ class FMMModel(RhythmModel):
 
             # Estrechar rejillas alrededor del mejor actual para siguiente iteracion
             if rep < self.num_reps - 1:
-                alpha_grid = self._refine_alpha_grid(
-                    par_final[2], alpha_grid
+                alpha_grid, alpha_step = self._refine_alpha_grid(
+                    par_final[2], self.length_alpha_grid, alpha_step,
                 )
-                omega_grid = self._refine_omega_grid(
-                    par_final[4], omega_grid
+                omega_grid, omega_step = self._refine_omega_grid(
+                    par_final[4], self.length_omega_grid, omega_step,
                 )
 
         if par_final is None:
@@ -674,7 +812,9 @@ class FMMModel(RhythmModel):
         # ── Valores ajustados finales y estadisticos ───────────────────
         fitted        = _fmm_predict(time_points, M, A, alpha, beta, omega)
         residuals     = data - fitted
-        residuals_std = self._standardise_residuals(residuals, ddof=5)
+        # ddof=1: s_g^2 = 1/(n-1) sum (e - e_bar)^2, la definicion del anexo
+        # "Deteccion de muestras atipicas" sobre la que opera el umbral |r| > 3.
+        residuals_std = self._standardise_residuals(residuals, ddof=1)
         r2            = self._r2(data, fitted)
         sse           = float(np.sum(residuals**2))
 
@@ -701,32 +841,52 @@ class FMMModel(RhythmModel):
 
     def _refine_alpha_grid(
         self,
-        centre: float,
-        prev_grid: np.ndarray,
-    ) -> np.ndarray:
+        centre:   float,
+        n_points: int,
+        step:     float,
+    ) -> tuple[np.ndarray, float]:
         """
         Estrecha la rejilla de alpha alrededor de ``centre``.
+
+        El paso de la rejilla anterior se recibe explicitamente en ``step`` en
+        vez de reconstruirse con ``mean(diff(prev_grid))``. La reconstruccion
+        falla porque la rejilla ya viene envuelta a ``[0, 2*pi)``: si ``centre``
+        cae cerca del origen, la rejilla contiene valores proximos a 0 y a
+        2*pi a la vez, de modo que ``mean(diff(sort(grid)))`` devuelve
+        aproximadamente ``2*pi/(n-1)`` y la rejilla no se estrecha en ninguna
+        de las iteraciones siguientes.
+
+        Returns
+        -------
+        (nueva_rejilla, nuevo_paso)
         """
-        amplitude = 1.5 * np.mean(np.diff(np.sort(prev_grid)))
-        new_grid  = np.linspace(
-            centre - amplitude,
-            centre + amplitude,
-            len(prev_grid),
-        )
-        return new_grid % (2 * np.pi)
+        amplitude = 1.5 * step
+        new_grid  = np.linspace(centre - amplitude, centre + amplitude, n_points)
+        new_step  = (2.0 * amplitude / (n_points - 1)) if n_points > 1 else step
+        return new_grid % (2 * np.pi), new_step
 
     def _refine_omega_grid(
         self,
-        centre: float,
-        prev_grid: np.ndarray,
-    ) -> np.ndarray:
+        centre:   float,
+        n_points: int,
+        step:     float,
+    ) -> tuple[np.ndarray, float]:
         """
         Estrecha la rejilla de omega alrededor de ``centre``.
+
+        Igual que ``_refine_alpha_grid`` pero sin envoltura circular. Los
+        extremos se recortan a ``(0, omega_max]``, asi que el paso efectivo se
+        mide sobre la rejilla generada.
+
+        Returns
+        -------
+        (nueva_rejilla, nuevo_paso)
         """
-        amplitude = 1.5 * np.mean(np.diff(np.sort(prev_grid)))
-        new_grid  = np.linspace(
-            max(centre - amplitude, 1e-6),
-            min(centre + amplitude, self.omega_max),
-            len(prev_grid),
-        )
-        return new_grid
+        amplitude = 1.5 * step
+        lo = max(centre - amplitude, 1e-6)
+        hi = min(centre + amplitude, self.omega_max)
+        if hi <= lo:
+            lo, hi = max(self.omega_max - 1e-6, 1e-6), self.omega_max
+        new_grid = np.linspace(lo, hi, n_points)
+        new_step = float(np.mean(np.diff(new_grid))) if n_points > 1 else step
+        return new_grid, new_step

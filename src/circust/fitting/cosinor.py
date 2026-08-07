@@ -111,7 +111,7 @@ class CosinorModel(RhythmModel):
 
         # ── Residuos y R-cuadrado ──────────────────────────────────────
         residuals     = data - fitted
-        residuals_std = self._standardise_residuals(residuals, 3)
+        residuals_std = self._standardise_residuals(residuals, ddof=1)
         r2            = self._r2(data, fitted)
         sse           = float(np.sum(residuals**2))
 

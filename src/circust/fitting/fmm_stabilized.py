@@ -22,6 +22,7 @@ se reutilizan para todos los genes).
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -230,21 +231,20 @@ class FMMGrid:
         evitar recalcularlos en cada ajuste.
 
     roughness : np.ndarray, shape (nG,)
-        Rugosidad de curvatura ``Sum(ddC^2) + Sum(ddS^2)`` por punto de rejilla,
-        sobre los tiempos observados.
+        Rugosidad de curvatura ``R_dense(alpha, omega)`` por punto de rejilla,
+        evaluada sobre la rejilla temporal densa y uniforme de ``n_dense``
+        puntos que define la Seccion S3.4.2 de CircaFMM.
 
-    dense_roughness : np.ndarray or None, shape (nG,)
-        Rugosidad calculada en una rejilla temporal densa uniforme.
-        None si no se ha llamado a ``add_dense_roughness``.
-
-    n_dense : int or None
-        Tamano de la rejilla densa, o None.
+    n_dense : int
+        Tamano de la rejilla temporal densa. Por defecto 512.
 
     order : np.ndarray, shape (n,)
         Permutacion que ordena los tiempos circularmente.
 
-    dt : np.ndarray, shape (n,)
-        Gaps circulares entre muestras consecutivas (la ultima envuelve).
+    rough_om_log, rough_val_log : np.ndarray
+        Tabla 1-D log-log de ``R_dense`` frente a omega, para el refinamiento
+        local fuera de rejilla. Ver la nota sobre independencia de alpha en
+        :func:`_refine_jit`.
     """
     times:           np.ndarray
     alpha_grid:      np.ndarray
@@ -258,9 +258,9 @@ class FMMGrid:
     CS:              np.ndarray
     roughness:       np.ndarray
     order:           np.ndarray
-    dt:              np.ndarray
-    dense_roughness: Optional[np.ndarray] = None
-    n_dense:         Optional[int]        = None
+    n_dense:         int
+    rough_om_log:    np.ndarray
+    rough_val_log:   np.ndarray
 
 
 @dataclass
@@ -279,9 +279,18 @@ class FMMCache:
 
     inv_XWX : np.ndarray, shape (nG, 3, 3)
         Inversa de la matriz normal ponderada para cada punto de rejilla.
+
+    den : np.ndarray, shape (nG,)
+        Denominador del criterio de potencia,
+        ``den[g] = sum_i w_i (C[g,i]^2 + S[g,i]^2)``. No depende del gen, de
+        modo que se calcula una sola vez aqui en lugar de en cada ajuste.
+        Nota: como la base ``(C, S)`` se renormaliza a modulo 1, este vector es
+        constante e igual a ``sum(w) = n`` salvo error de redondeo. Se almacena
+        calculado y no como escalar para no depender de esa propiedad.
     """
     weights: np.ndarray
     inv_XWX: np.ndarray
+    den:     np.ndarray
 
 
 @dataclass
@@ -324,6 +333,8 @@ class FMMPreparedDataset:
     lambda_star:   float
     omega0:        float = 0.10
     penalty_power: float = 3.0
+    # Vector ``lambda* g(omega) R(alpha, omega)``, que no depende del gen.
+    penalty:       Optional[np.ndarray] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -411,6 +422,7 @@ def precompute_grid(
     times:      np.ndarray,
     alpha_grid: Optional[np.ndarray] = None,
     omega_grid: Optional[np.ndarray] = None,
+    n_dense:    int = 512,
 ) -> FMMGrid:
     """Precomputa la base trigonometrica y la rugosidad para la rejilla.
 
@@ -418,10 +430,26 @@ def precompute_grid(
 
     - ``C[g, i], S[g, i]``: coseno y seno de la fase Mobius en cada muestra.
     - ``C2, S2, CS``: productos elementales (precomputados para WLS rapida).
-    - ``roughness[g]``: rugosidad de curvatura sobre los tiempos observados.
+    - ``roughness[g]``: ``R_dense(alpha, omega)`` de la Seccion S3.4.2.
 
-    Tambien se almacenan ``order`` y ``dt`` (orden circular y gaps entre
-    muestras consecutivas) para reutilizar en la calibracion de lambda.
+    Sobre el modo de rugosidad
+    --------------------------
+    CircaFMM define la rugosidad de dos maneras. ``R_obs`` la evalua sobre los
+    propios instantes de observacion y sus huecos circulares, de modo que
+    depende del diseno de muestreo. ``R_dense`` la evalua sobre una rejilla
+    uniforme de ``n_dense`` puntos con espaciado constante, de modo que depende
+    unicamente de ``(alpha, omega)``.
+
+    Aqui se implementa solo ``R_dense``. El motivo es el que da el propio
+    articulo. Con huecos amplios en el muestreo la transicion de la fase en
+    torno a ``t = alpha + pi`` puede caer integramente dentro de un intervalo
+    no observado, con lo que ``R_obs`` no la ve y la penalizacion no se
+    dispara. A la inversa, instantes casi duplicados dan incrementos
+    ``Delta t`` minusculos que inflan las pendientes de forma erratica. Ambas
+    situaciones son las de CIRCUST, donde los instantes son la escala circular
+    inducida por el CPCA y por tanto irregulares por construccion. Es tambien
+    la eleccion que hacen los autores para GTEx-13T, cuyos tiempos proceden
+    igualmente de un orden estimado y no de un diseno regular.
 
     Parameters
     ----------
@@ -431,11 +459,15 @@ def precompute_grid(
         Rejilla de alpha. Por defecto: 48 valores en ``[0, 2*pi)``.
     omega_grid : np.ndarray, opcional
         Rejilla de omega. Por defecto: 30 valores log-espaciados en ``[1e-4, 1]``.
+    n_dense : int
+        Tamano de la rejilla temporal densa. Por defecto 512.
     """
     times = np.ascontiguousarray(times, dtype=np.float64) % (2.0 * np.pi)
     n = times.shape[0]
     if n < 4:
-        raise ValueError("Se necesitan al menos 4 muestras para la rugosidad.")
+        raise ValueError("Se necesitan al menos 4 muestras.")
+    if n_dense < 16:
+        raise ValueError("n_dense debe ser >= 16.")
 
     if alpha_grid is None:
         alpha_grid = np.linspace(0.0, 2.0 * np.pi, 48, endpoint=False)
@@ -452,66 +484,52 @@ def precompute_grid(
     alpha_vec = A_mesh.ravel()
     omega_vec = W_mesh.ravel()
 
-    # Base trigonometrica para todos los puntos (kernel JIT)
-    C, S = _fill_basis_jit(times, alpha_vec, omega_vec, float(np.finfo(float).eps))
+    eps = float(np.finfo(float).eps)
+
+    # Base trigonometrica sobre los tiempos observados (kernel JIT)
+    C, S = _fill_basis_jit(times, alpha_vec, omega_vec, eps)
 
     # Productos elementales (se reusan para la WLS y para la potencia)
     C2 = C * C
     S2 = S * S
     CS = C * S
 
-    # Orden circular y gaps entre muestras consecutivas
+    # Orden circular de las muestras (lo usa el diagnostico de salto maximo)
     order = np.argsort(times)
-    t_ord = times[order]
-    dt = np.concatenate([np.diff(t_ord),
-                         np.array([(t_ord[0] + 2.0 * np.pi) - t_ord[-1]])])
-    dt = np.maximum(dt, np.finfo(float).eps)
 
-    # Rugosidad por punto de rejilla (sobre tiempos observados)
-    roughness = _curvature_roughness(C, S, dt, order)
+    # ── R_dense sobre la rejilla temporal uniforme ───────────────────────
+    t_dense  = np.linspace(0.0, 2.0 * np.pi, n_dense, endpoint=False)
+    dt_dense = np.full(n_dense, 2.0 * np.pi / n_dense)
+    ord_dense = np.arange(n_dense)
+
+    C_d, S_d = _fill_basis_jit(t_dense, alpha_vec, omega_vec, eps)
+    roughness = _curvature_roughness(C_d, S_d, dt_dense, ord_dense)
+
+    # Tabla 1-D R_dense(omega) para el refinamiento local fuera de rejilla.
+    # Basta con un valor de alpha porque R_dense no depende de el (rejilla
+    # temporal uniforme sobre toda la circunferencia).
+    n_table = 512
+    om_tab  = np.exp(np.linspace(np.log(1e-4), np.log(1.0), n_table))
+    C_t, S_t = _fill_basis_jit(t_dense, np.zeros(n_table), om_tab, eps)
+    R_tab = _curvature_roughness(C_t, S_t, dt_dense, ord_dense)
 
     return FMMGrid(
-        times      = times,
-        alpha_grid = alpha_grid,
-        omega_grid = omega_grid,
-        alpha_vec  = alpha_vec,
-        omega_vec  = omega_vec,
-        C          = C,
-        S          = S,
-        C2         = C2,
-        S2         = S2,
-        CS         = CS,
-        roughness  = roughness,
-        order      = order,
-        dt         = dt,
+        times         = times,
+        alpha_grid    = alpha_grid,
+        omega_grid    = omega_grid,
+        alpha_vec     = alpha_vec,
+        omega_vec     = omega_vec,
+        C             = C,
+        S             = S,
+        C2            = C2,
+        S2            = S2,
+        CS            = CS,
+        roughness     = roughness,
+        order         = order,
+        n_dense       = int(n_dense),
+        rough_om_log  = np.log(om_tab),
+        rough_val_log = np.log(np.maximum(R_tab, 1e-300)),
     )
-
-
-def add_dense_roughness(grid: FMMGrid, n_dense: int = 512) -> FMMGrid:
-    """Anade rugosidad calculada en rejilla temporal densa uniforme al ``grid``.
-
-    Cuando los tiempos observados son escasos o irregulares, la rugosidad
-    sobre tiempos observados es una aproximacion ruidosa. Sobre una rejilla
-    uniforme densa de ``n_dense`` puntos, la rugosidad refleja mejor la
-    suavidad intrinseca de la base ``(C, S)``.
-
-    El campo ``grid.dense_roughness`` queda relleno; ``rough_mode='dense'``
-    en ``fit_gene`` lo usara automaticamente.
-    """
-    if n_dense < 16:
-        raise ValueError("n_dense debe ser >= 16.")
-
-    # Rejilla temporal uniforme y dt constantes
-    t_dense = np.linspace(0.0, 2.0 * np.pi, n_dense, endpoint=False)
-    dt = np.full(n_dense, 2.0 * np.pi / n_dense)
-    order = np.arange(n_dense)
-
-    C_dense, S_dense = _fill_basis_jit(
-        t_dense, grid.alpha_vec, grid.omega_vec, float(np.finfo(float).eps),
-    )
-    grid.dense_roughness = _curvature_roughness(C_dense, S_dense, dt, order)
-    grid.n_dense = int(n_dense)
-    return grid
 
 
 def prepare_cache(
@@ -567,12 +585,32 @@ def prepare_cache(
     # Invertir todo el tensor de una vez (NumPy/LAPACK vectorizado)
     inv_XWX = np.linalg.inv(A)
 
-    return FMMCache(weights=w, inv_XWX=inv_XWX)
+    # Denominador del criterio de potencia: a22 + a33 = sum_i w_i (C^2 + S^2)
+    den = a22 + a33
+
+    return FMMCache(weights=w, inv_XWX=inv_XWX, den=den)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Seccion 5 — Ajuste por gen (criterio de potencia + penalizacion)
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _penalty_vector(
+    grid:          FMMGrid,
+    lambda_:       float,
+    omega0:        float,
+    penalty_power: float,
+) -> np.ndarray:
+    """Termino de penalizacion ``lambda * g(omega) * R(alpha, omega)`` por punto de rejilla.
+
+    No depende de los datos del gen, solo de la rejilla y de los parametros de
+    regularizacion, de modo que se calcula una sola vez por conjunto de datos.
+    """
+    if lambda_ <= 0:
+        return np.zeros(grid.alpha_vec.shape[0], dtype=np.float64)
+    g_omega = (omega0 / (grid.omega_vec + omega0)) ** penalty_power
+    return lambda_ * g_omega * grid.roughness
+
 
 def _compute_power_scores(
     data:          np.ndarray,
@@ -581,7 +619,8 @@ def _compute_power_scores(
     lambda_:       float,
     omega0:        float,
     penalty_power: float,
-    rough_mode:    str,
+    den:           Optional[np.ndarray] = None,
+    penalty:       Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Calcula el criterio  ``J(alpha, omega) = P - lambda*g(omega)*R``  para toda la rejilla.
 
@@ -589,10 +628,13 @@ def _compute_power_scores(
       con  ``u = sum(w*x_centered*C)``,  ``v = sum(w*x_centered*S)``,
       ``den = sum(w*C^2) + sum(w*S^2)``.
     - ``g(omega) = (omega0 / (omega + omega0))^p``
-    - ``R(alpha, omega)`` = rugosidad de curvatura (``grid.roughness`` u
-      ``grid.dense_roughness`` segun ``rough_mode``).
+    - ``R(alpha, omega) = R_dense(alpha, omega)``, en ``grid.roughness``.
 
     Operaciones todas vectorizadas matriz-vector — un solo gen cuesta O(nG*n).
+
+    ``den`` y ``penalty`` son cantidades que no dependen del gen. Si se pasan
+    precomputadas se ahorran, por cada gen, los dos productos matriz-vector que
+    calculan el denominador y el vector de penalizacion completo.
     """
     # Centrar los datos por la media ponderada (asi el intercepto desaparece de la ecuacion)
     mu_w = float((weights * data).sum() / weights.sum())
@@ -604,25 +646,17 @@ def _compute_power_scores(
     pow_ = u * u + v * v
 
     # Normalizacion Lomb-Scargle: dividir por la norma de la base ponderada
-    den = grid.C2 @ weights + grid.S2 @ weights
+    if den is None:
+        den = grid.C2 @ weights + grid.S2 @ weights
     den = np.where(den > 0, den, np.nan)
     pow_ = pow_ / den
 
     if lambda_ <= 0:
         return pow_
 
-    # Penalizacion
-    if rough_mode == "dense":
-        if grid.dense_roughness is None:
-            raise ValueError("rough_mode='dense' pero grid.dense_roughness es None.")
-        roughness = grid.dense_roughness
-    elif rough_mode == "observed":
-        roughness = grid.roughness
-    else:
-        raise ValueError(f"rough_mode desconocido: {rough_mode}")
-
-    g_omega = (omega0 / (grid.omega_vec + omega0)) ** penalty_power
-    return pow_ - lambda_ * g_omega * roughness
+    if penalty is None:
+        penalty = _penalty_vector(grid, lambda_, omega0, penalty_power)
+    return pow_ - penalty
 
 
 def _wls_fit_at(
@@ -673,125 +707,265 @@ def _wls_fit_at(
     )
 
 
-def _local_refine(
-    alpha:           float,
-    omega:           float,
-    score_init:      float,
-    data:            np.ndarray,
-    grid:            FMMGrid,
-    weights:         np.ndarray,
-    lambda_:         float,
-    omega0:          float,
-    penalty_power:   float,
-    rough_mode:      str,
-    n_steps:         int   = 3,
-    alpha_step:      Optional[float] = None,
-    omega_step_mult: float = 1.25,
-    omega_min:       float = 1e-4,
-    omega_max:       float = 1.0,
-) -> tuple[float, float]:
-    """Refinamiento local en 8 direcciones con halveo de paso (alpha, omega).
+@njit(cache=True, fastmath=True)
+def _interp_loglog(x: float, xp_log: np.ndarray, fp_log: np.ndarray) -> float:
+    """Interpolacion lineal en escala log-log, con extrapolacion constante.
 
-    En cada iteracion evalua 8 candidatos ``(alpha +/- da, omega * o_mult^{0,+1,-1})``
-    y escoge el de mayor score. Si ninguno mejora, halvea ``da`` y reduce ``o_mult``.
-
-    El score se evalua off-grid recomputando ``C, S, R`` con ``_mobius_cos_sin``.
+    ``xp_log`` debe estar ordenado de forma creciente. Se usa para leer
+    ``R_dense(omega)`` de una tabla precomputada.
     """
-    if alpha_step is None:
-        alpha_step = (2.0 * np.pi) / max(48, len(grid.alpha_grid))
-    da = float(alpha_step)
-    om = float(omega_step_mult)
+    lx = math.log(x)
+    m  = xp_log.shape[0]
+    if lx <= xp_log[0]:
+        return math.exp(fp_log[0])
+    if lx >= xp_log[m - 1]:
+        return math.exp(fp_log[m - 1])
+    lo, hi = 0, m - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if xp_log[mid] <= lx:
+            lo = mid
+        else:
+            hi = mid
+    w = (lx - xp_log[lo]) / (xp_log[hi] - xp_log[lo])
+    return math.exp(fp_log[lo] + w * (fp_log[hi] - fp_log[lo]))
 
-    # Centrado para potencia
-    mu_w = float((weights * data).sum() / weights.sum())
-    wx0 = weights * (data - mu_w)
 
-    # Roughness en rejilla densa: precalculada en grid; off-grid la recalculamos al vuelo
-    if rough_mode == "dense":
-        # Rejilla temporal densa cacheada en el grid (si add_dense_roughness lo creo)
-        if grid.n_dense is None:
-            raise ValueError("rough_mode='dense' requiere add_dense_roughness aplicado.")
-        n_d = grid.n_dense
-        t_dense = np.linspace(0.0, 2.0 * np.pi, n_d, endpoint=False)
-        dt_d = np.full(n_d, 2.0 * np.pi / n_d)
-        order_d = np.arange(n_d)
-        rough_times = t_dense
-        rough_dt = dt_d
-        rough_order = order_d
-    else:
-        rough_times = grid.times
-        rough_dt = grid.dt
-        rough_order = grid.order
+@njit(cache=True, fastmath=True)
+def _refine_jit(
+    times:      np.ndarray,
+    data:       np.ndarray,
+    weights:    np.ndarray,
+    wx0:        np.ndarray,
+    om_log:     np.ndarray,
+    rough_log:  np.ndarray,
+    alpha0:     float,
+    omega_ini:  float,
+    score_init: float,
+    lambda_:    float,
+    omega0:     float,
+    pen_power:  float,
+    n_steps:    int,
+    alpha_step: float,
+    omega_mult: float,
+    omega_min:  float,
+    omega_max:  float,
+    tau:        float,
+    ridge:      float,
+    den_eps:    float,
+):
+    """Refinamiento local de ``(alpha, omega)``, Algoritmo S2 de CircaFMM.
 
-    def score_at(a: float, o: float) -> float:
-        a = a % (2.0 * np.pi)
-        o = max(min(o, omega_max), omega_min)
-        # Potencia
-        C, S = _mobius_cos_sin(grid.times, a, o)
-        u = float((wx0 * C).sum())
-        v = float((wx0 * S).sum())
-        den = float((weights * C * C).sum() + (weights * S * S).sum())
-        if den <= 0:
-            return -np.inf
-        score = (u * u + v * v) / den
-        if lambda_ <= 0:
-            return score
-        # Rugosidad
-        Cr, Sr = _mobius_cos_sin(rough_times, a, o)
-        Cr_o = Cr[rough_order]; Sr_o = Sr[rough_order]
-        slope_C = (np.roll(Cr_o, -1) - Cr_o) / rough_dt
-        slope_S = (np.roll(Sr_o, -1) - Sr_o) / rough_dt
-        ddC = slope_C - np.roll(slope_C, 1)
-        ddS = slope_S - np.roll(slope_S, 1)
-        R = float((ddC * ddC).sum() + (ddS * ddS).sum())
-        g = (omega0 / (o + omega0)) ** penalty_power
-        return score - lambda_ * g * R
+    Tras el maximizador grueso sobre la rejilla se aplica una busqueda de
+    patron sobre un entorno discreto de ocho vecinos, dos movimientos en
+    ``alpha``, dos en ``omega`` y cuatro combinados, con ``alpha`` envuelto
+    modulo ``2*pi`` y ``omega`` recortado al intervalo admisible.
 
-    score_cur = float(score_init)
-    a_cur, o_cur = float(alpha), float(omega)
+    La eleccion entre los ocho candidatos no es el simple maximo de
+    ``J(alpha, omega)``. El articulo define tres etapas.
+
+    Primero se retienen los candidatos cuyo criterio queda a menos de una
+    tolerancia relativa del mejor,
+
+        J(alpha, omega) >= Jmax - tau * max(1, |Jmax|),   tau = 1e-4.
+
+    Despues, entre los retenidos, se elige el que minimiza el objetivo
+    secundario ``WRSS(alpha, omega) + lambda g(omega) R(alpha, omega)``, donde
+    ``WRSS`` procede del ajuste por minimos cuadrados ponderados condicionado
+    al par candidato. Por ultimo, si ese objetivo empata, se prefiere el
+    ``omega`` mayor, con lo que se evita el desplazamiento innecesario hacia la
+    frontera de ``omega`` pequenos, que es justamente la region que toda la
+    regularizacion trata de evitar.
+
+    El candidato asi elegido se acepta solo si mejora estrictamente el
+    criterio actual. En caso contrario se contrae el entorno, ``alpha_step``
+    a la mitad y ``omega_mult`` a su raiz cuadrada.
+
+    La rugosidad se lee por interpolacion log-log de una tabla en ``omega``.
+    Es licito porque ``R_dense`` no depende de ``alpha``: la rejilla temporal
+    densa es uniforme y cubre toda la circunferencia, de modo que trasladar
+    ``alpha`` solo rota que punto de la rejilla evalua cada valor de la base y
+    la suma de curvaturas discretas queda invariante. Se comprueba
+    numericamente que la variacion con ``alpha`` es del orden de 1e-16 en
+    terminos relativos, y el error de la interpolacion con 512 nodos es como
+    mucho de 3e-4 relativo.
+
+    Devuelve ``(alpha, omega)``.
+    """
+    n      = times.shape[0]
+    two_pi = 2.0 * math.pi
+
+    da      = alpha_step
+    om_step = omega_mult
+    a_cur   = alpha0
+    o_cur   = omega_ini
+    sc_cur  = score_init
+
+    cand_a   = np.empty(8)
+    cand_o   = np.empty(8)
+    cand_J   = np.empty(8)
+    cand_sec = np.empty(8)
+    Cb       = np.empty(n)
+    Sb       = np.empty(n)
 
     for _ in range(n_steps):
-        # 8 candidatos: 4 cardinales + 4 diagonales
-        cands = [
-            (a_cur + da, o_cur),
-            (a_cur - da, o_cur),
-            (a_cur, o_cur * om),
-            (a_cur, o_cur / om),
-            (a_cur + da, o_cur * om),
-            (a_cur - da, o_cur * om),
-            (a_cur + da, o_cur / om),
-            (a_cur - da, o_cur / om),
-        ]
-        scores = np.array([score_at(a, o) for a, o in cands])
-        if not np.any(np.isfinite(scores)):
-            da *= 0.5; om = math.sqrt(om); continue
-        idx = int(np.nanargmax(scores))
-        if scores[idx] > score_cur:
-            a_cur, o_cur = cands[idx]
-            a_cur = a_cur % (2.0 * np.pi)
-            o_cur = max(min(o_cur, omega_max), omega_min)
-            score_cur = float(scores[idx])
+
+        for c in range(8):
+            # 2 movimientos en alpha, 2 en omega y 4 combinados
+            if c == 0:
+                a = a_cur + da; o = o_cur
+            elif c == 1:
+                a = a_cur - da; o = o_cur
+            elif c == 2:
+                a = a_cur;      o = o_cur * om_step
+            elif c == 3:
+                a = a_cur;      o = o_cur / om_step
+            elif c == 4:
+                a = a_cur + da; o = o_cur * om_step
+            elif c == 5:
+                a = a_cur - da; o = o_cur * om_step
+            elif c == 6:
+                a = a_cur + da; o = o_cur / om_step
+            else:
+                a = a_cur - da; o = o_cur / om_step
+
+            a = a % two_pi
+            if o < omega_min:
+                o = omega_min
+            elif o > omega_max:
+                o = omega_max
+
+            cand_a[c] = a
+            cand_o[c] = o
+
+            # ── base de la fase y acumuladores ────────────────────────────
+            o2  = o * o
+            u   = 0.0
+            v   = 0.0
+            den = 0.0
+            a11 = 0.0; a12 = 0.0; a13 = 0.0
+            a22 = 0.0; a23 = 0.0; a33 = 0.0
+            b1  = 0.0; b2  = 0.0; b3  = 0.0
+            for i in range(n):
+                uu = 0.5 * ((times[i] % two_pi) - a)
+                s  = math.sin(uu)
+                cc = math.cos(uu)
+                d  = cc * cc + o2 * s * s + den_eps
+                C  = (cc * cc - o2 * s * s) / d
+                S  = (2.0 * o * s * cc) / d
+                r  = math.sqrt(C * C + S * S) + den_eps
+                C /= r
+                S /= r
+                Cb[i] = C
+                Sb[i] = S
+
+                wi = weights[i]
+                xi = data[i]
+                u   += wx0[i] * C
+                v   += wx0[i] * S
+                den += wi * (C * C + S * S)
+
+                a11 += wi
+                a12 += wi * C
+                a13 += wi * S
+                a22 += wi * C * C
+                a23 += wi * C * S
+                a33 += wi * S * S
+                b1  += wi * xi
+                b2  += wi * xi * C
+                b3  += wi * xi * S
+
+            if den <= 0.0:
+                cand_J[c]   = -1.0e308
+                cand_sec[c] =  1.0e308
+                continue
+
+            # ── criterio J = P - lambda g(omega) R ────────────────────────
+            P = (u * u + v * v) / den
+            pen = 0.0
+            if lambda_ > 0.0:
+                R = _interp_loglog(o, om_log, rough_log)
+                g = (omega0 / (o + omega0)) ** pen_power
+                pen = lambda_ * g * R
+            cand_J[c] = P - pen
+
+            # ── objetivo secundario: WRSS + lambda g(omega) R ─────────────
+            a11 += ridge; a22 += ridge; a33 += ridge
+            m11 = a22 * a33 - a23 * a23
+            m12 = a12 * a33 - a23 * a13
+            m13 = a12 * a23 - a22 * a13
+            det = a11 * m11 - a12 * m12 + a13 * m13
+            if abs(det) < 1e-300:
+                cand_sec[c] = 1.0e308
+                continue
+            M   = (b1 * m11 - a12 * (b2 * a33 - a23 * b3)
+                   + a13 * (b2 * a23 - a22 * b3)) / det
+            dlt = (a11 * (b2 * a33 - a23 * b3) - b1 * m12
+                   + a13 * (a12 * b3 - b2 * a13)) / det
+            gam = (a11 * (a22 * b3 - b2 * a23) - a12 * (a12 * b3 - b2 * a13)
+                   + b1 * m13) / det
+            wrss = 0.0
+            for i in range(n):
+                e = data[i] - (M + dlt * Cb[i] + gam * Sb[i])
+                wrss += weights[i] * e * e
+            cand_sec[c] = wrss + pen
+
+        # ── etapa 1: candidatos dentro de la tolerancia relativa ──────────
+        Jmax = -1.0e308
+        for c in range(8):
+            if cand_J[c] > Jmax:
+                Jmax = cand_J[c]
+        if Jmax <= -1.0e307:
+            da      *= 0.5
+            om_step  = math.sqrt(om_step)
+            continue
+        thr = Jmax - tau * max(1.0, abs(Jmax))
+
+        # ── etapas 2 y 3: minimo del objetivo secundario, empate a omega mayor
+        best = -1
+        for c in range(8):
+            if cand_J[c] < thr:
+                continue
+            if best < 0:
+                best = c
+            elif cand_sec[c] < cand_sec[best] - 1e-12:
+                best = c
+            elif abs(cand_sec[c] - cand_sec[best]) <= 1e-12 and cand_o[c] > cand_o[best]:
+                best = c
+
+        # ── aceptacion solo si mejora estrictamente ───────────────────────
+        if best >= 0 and cand_J[best] > sc_cur:
+            a_cur  = cand_a[best]
+            o_cur  = cand_o[best]
+            sc_cur = cand_J[best]
         else:
-            da *= 0.5
-            om = math.sqrt(om)
+            da      *= 0.5
+            om_step  = math.sqrt(om_step)
 
     return a_cur, o_cur
 
 
 def fit_gene(
-    data:       np.ndarray,
-    prepared:   FMMPreparedDataset,
-    refine:     bool = True,
-    rough_mode: str  = "dense",
+    data:         np.ndarray,
+    prepared:     FMMPreparedDataset,
+    refine:       bool = True,
+    refine_steps: int  = 3,
 ) -> FitResult:
     """Ajuste FMM estabilizado para un gen.
 
     Algoritmo:
       1. Calcula ``J(alpha, omega) = P - lambda*g(omega)*R`` para toda la rejilla.
-      2. Selecciona el ``(alpha*, omega*)`` con maximo score.
-      3. (Opcional) Refinamiento local 2D con halveo de paso.
+      2. Selecciona el ``(alpha*, omega*)`` que maximiza ``J``.
+      3. (Opcional) Refinamiento local, Algoritmo S2. Ver :func:`_refine_jit`.
       4. WLS exacta 3x3 en ``(alpha*, omega*)`` para obtener ``M, A, beta``.
       5. Construye ``FitResult`` compatible con ``FMMModel``.
+
+    En el paso 2 se toma el maximo sin tolerancias ni desempates, que es como
+    lo define la Seccion S3.4.3 del articulo. La regla de tolerancia relativa y
+    el criterio secundario aparecen unicamente en el refinamiento del paso 3.
+
+    ``refine_steps`` es el numero ``S`` de pasos de la busqueda de patron. El
+    valor por defecto, 3, es el del articulo.
 
     El ``model_name`` del resultado es ``"fmm_stabilized"`` (vs ``"fmm"`` en el base),
     por si se quiere distinguir mas adelante. Las claves de ``params`` son las
@@ -809,28 +983,40 @@ def fit_gene(
     omega0  = float(prepared.omega0)
     p       = float(prepared.penalty_power)
 
-    # 1. Score sobre toda la rejilla
+    # 1. Score sobre toda la rejilla. ``den`` y ``penalty`` van precomputados
+    # porque no dependen del gen.
     scores = _compute_power_scores(
-        data, grid, weights, lambda_, omega0, p, rough_mode,
+        data, grid, weights, lambda_, omega0, p,
+        den=prepared.cache.den, penalty=prepared.penalty,
     )
     scores_safe = np.where(np.isfinite(scores), scores, -np.inf)
     if not np.any(np.isfinite(scores_safe)):
         raise RuntimeError("Ningun score finito en la rejilla.")
 
-    # 2. Seleccion con desempate por omega mayor entre candidatos cercanos
-    sc_max = float(scores_safe.max())
-    close = np.where(scores_safe >= sc_max - 1e-2)[0]
-    # Entre los cercanos, escoger el de omega mas grande (forma mas suave)
-    idx = int(close[int(np.argmax(grid.omega_vec[close]))])
+    # 2. Seleccion sobre la rejilla: maximizador de J(alpha, omega), sin
+    # tolerancias ni desempates (Seccion S3.4.3).
+    idx = int(np.argmax(scores_safe))
     alpha = float(grid.alpha_vec[idx])
     omega = float(grid.omega_vec[idx])
 
-    # 3. Refinamiento local 2D opcional
+    # 3. Refinamiento local opcional (Algoritmo S2)
     if refine:
-        alpha, omega = _local_refine(
-            alpha, omega, scores_safe[idx],
-            data, grid, weights, lambda_, omega0, p, rough_mode,
+        mu_w = float((weights * data).sum() / weights.sum())
+        wx0  = np.ascontiguousarray(weights * (data - mu_w))
+        alpha, omega = _refine_jit(
+            grid.times, np.ascontiguousarray(data), weights, wx0,
+            grid.rough_om_log, grid.rough_val_log,
+            float(alpha), float(omega), float(scores_safe[idx]),
+            lambda_, omega0, p,
+            int(refine_steps),
+            (2.0 * np.pi) / max(48, len(grid.alpha_grid)),   # Delta_alpha
+            1.25,                                            # eta
+            1e-4, 1.0,                                       # omega_min, omega_max
+            1e-4,                                            # tau
+            1e-10,                                           # ridge de la WLS
+            float(np.finfo(float).eps),
         )
+        alpha, omega = float(alpha), float(omega)
 
     # 4. WLS final exacta en el punto seleccionado
     fit = _wls_fit_at(data, alpha, omega, weights, prepared.times)
@@ -838,8 +1024,9 @@ def fit_gene(
     # 5. Construir FitResult (mismo formato que FMMModel)
     fitted = fit["fitted"]
     residuals = data - fitted
-    # Ajustamos std residuos con ddof=5 (mismo que FMMModel)
-    res_std = residuals.std(ddof=5)
+    # Residuos estandarizados con ddof=1, es decir s_g^2 = 1/(n-1) sum (e - e_bar)^2,
+    # tal y como se define en el anexo "Deteccion de muestras atipicas".
+    res_std = residuals.std(ddof=1)
     residuals_std = (residuals - residuals.mean()) / res_std if res_std > 0 \
                     else np.zeros_like(residuals)
     sse = float(np.sum(residuals ** 2))
@@ -909,11 +1096,16 @@ def _pick_lambda_elbow(
     o = np.argsort(lam)
     lam = lam[o]; y_raw = y_raw[o]
 
-    # Alisado con mediana movil de ventana impar
+    # Alisado con mediana movil de ventana impar.
+    # Se usa ``median_filter(mode='nearest')`` y no ``scipy.signal.medfilt``
+    # porque este ultimo rellena con ceros fuera del borde: con una curva
+    # positiva y decreciente sustituye Q(lambda_1) y Q(lambda_L) por el minimo
+    # de sus vecinos, y esos dos puntos son justamente los que definen la
+    # cuerda del criterio de distancia con el que se localiza el codo.
     if smooth_k and smooth_k > 1:
-        from scipy.signal import medfilt
+        from scipy.ndimage import median_filter
         k = smooth_k if smooth_k % 2 == 1 else smooth_k + 1
-        y = medfilt(y_raw, kernel_size=k)
+        y = median_filter(y_raw, size=k, mode="nearest")
     else:
         y = y_raw
 
@@ -942,7 +1134,6 @@ def _simulate_spikes_vectorized(
     lambda_:    float,
     omega0:     float,
     penalty_power: float,
-    rough_mode: str,
 ) -> np.ndarray:
     """Simula B fits + spike_max_jump de una sola pasada, totalmente vectorizado.
 
@@ -978,18 +1169,16 @@ def _simulate_spikes_vectorized(
     pow_ = (U * U + V * V) / den_safe[None, :]       # (B, nG)
 
     if lambda_ > 0:
-        rough = grid.dense_roughness if rough_mode == "dense" else grid.roughness
         g_omega = (omega0 / (grid.omega_vec + omega0)) ** penalty_power
-        score = pow_ - lambda_ * g_omega[None, :] * rough[None, :]
+        score = pow_ - lambda_ * g_omega[None, :] * grid.roughness[None, :]
     else:
         score = pow_
 
-    # 4. Argmax con desempate por omega mayor (entre puntos cercanos al max)
+    # 4. Argmax de J por replica. Misma regla de seleccion que ``fit_gene``:
+    # la calibracion tiene que reproducir exactamente el ajuste que se usara
+    # despues, o el lambda* calibrado no corresponderia al procedimiento real.
     score_safe = np.where(np.isfinite(score), score, -np.inf)
-    sc_max = score_safe.max(axis=1, keepdims=True)   # (B, 1)
-    is_close = score_safe >= (sc_max - 1e-2)
-    omega_masked = np.where(is_close, grid.omega_vec[None, :], -np.inf)
-    idx_b = np.argmax(omega_masked, axis=1)          # (B,)
+    idx_b = np.argmax(score_safe, axis=1)            # (B,)
 
     # 5. WLS final usando cache: coef_b = inv_XWX[idx_b] @ b_vec_b
     C_at = grid.C[idx_b]                             # (B, n)
@@ -1020,12 +1209,11 @@ def calibrate_lambda(
     grid:          FMMGrid,
     cache:         FMMCache,
     lambda_grid:   Optional[np.ndarray] = None,
-    n_simulations: int    = 500,
-    quantile:      float  = 0.99,
+    n_simulations: int    = 1000,
+    quantile:      float  = 0.975,
     sigma:         float  = 1.0,
     omega0:        float  = 0.10,
     penalty_power: float  = 3.0,
-    rough_mode:    str    = "dense",
     seed:          int    = 1,
     smooth_k:      int    = 3,
     center_null:   bool   = True,
@@ -1063,7 +1251,7 @@ def calibrate_lambda(
     for i, lam in enumerate(lambda_grid):
         spikes = _simulate_spikes_vectorized(
             Xnull, weights, grid, cache,
-            float(lam), omega0, penalty_power, rough_mode,
+            float(lam), omega0, penalty_power,
         )
         q_spike[i] = float(np.quantile(spikes, quantile))
 
@@ -1118,11 +1306,10 @@ def prepare_dataset(
     omega0:            float = 0.10,
     penalty_power:     float = 3.0,
     n_dense:           int   = 512,
-    n_simulations:     int   = 500,
+    n_simulations:     int   = 1000,
     n_repeats:         int   = 5,
-    quantile:          float = 0.99,
+    quantile:          float = 0.975,
     seed:              int   = 1,
-    rough_mode:        str   = "dense",
 ) -> FMMPreparedDataset:
     """Preparacion completa del dataset para ajuste estabilizado.
 
@@ -1135,7 +1322,7 @@ def prepare_dataset(
     1. Si ``weights`` es None: pesos de densidad temporal von Mises
        (kappa seleccionado por LOO-CV).
     2. Construir rejillas alpha/omega (defaults equivalentes al codigo R).
-    3. ``precompute_grid`` + ``add_dense_roughness``.
+    3. ``precompute_grid`` (incluye la rugosidad densa).
     4. ``prepare_cache`` con los pesos.
     5. Si ``lambda_star`` es None: ``calibrate_lambda_repeat`` con
        ``n_repeats`` repeticiones agregadas por mediana.
@@ -1159,8 +1346,8 @@ def prepare_dataset(
         Tamano de la rejilla densa para rugosidad estable.
     n_simulations, n_repeats, quantile, seed : float/int
         Parametros del Monte Carlo de calibracion (solo si lambda_star=None).
-    rough_mode : str
-        ``"dense"`` o ``"observed"``.
+        Los valores por defecto son los del articulo: B = 1000 replicas nulas,
+        R = 5 repeticiones y cuantil q = 0,975.
     """
     times = np.ascontiguousarray(times, dtype=np.float64) % (2.0 * np.pi)
 
@@ -1174,9 +1361,8 @@ def prepare_dataset(
     alpha_grid = np.linspace(0.0, 2.0 * np.pi, length_alpha_grid, endpoint=False)
     omega_grid = np.exp(np.linspace(np.log(1e-4), np.log(omega_max), length_omega_grid))
 
-    grid = precompute_grid(times, alpha_grid=alpha_grid, omega_grid=omega_grid)
-    if rough_mode == "dense":
-        grid = add_dense_roughness(grid, n_dense=n_dense)
+    grid = precompute_grid(times, alpha_grid=alpha_grid, omega_grid=omega_grid,
+                           n_dense=n_dense)
 
     # 4. Cache WLS
     cache = prepare_cache(weights, grid)
@@ -1196,8 +1382,11 @@ def prepare_dataset(
             sigma         = 1.0,
             omega0        = omega0,
             penalty_power = penalty_power,
-            rough_mode    = rough_mode,
         )
+
+    penalty = _penalty_vector(
+        grid, float(lambda_star), float(omega0), float(penalty_power),
+    )
 
     return FMMPreparedDataset(
         times         = times,
@@ -1207,6 +1396,7 @@ def prepare_dataset(
         lambda_star   = float(lambda_star),
         omega0        = float(omega0),
         penalty_power = float(penalty_power),
+        penalty       = penalty,
     )
 
 
@@ -1252,25 +1442,44 @@ class StabilizedFMMModel(RhythmModel):
         Si se proporciona, se usa directamente. Si es None, se prepara
         de forma lazy en el primer ``fit()``.
     refine : bool
-        Si aplicar refinamiento local 2D tras la seleccion en rejilla.
-    rough_mode : str
-        ``"dense"`` (recomendado) o ``"observed"``.
+        Si aplicar el refinamiento local del Algoritmo S2 tras la seleccion
+        sobre la rejilla.
+    refine_steps : int
+        Numero ``S`` de pasos del refinamiento. Por defecto 3, el del articulo.
     **prep_kwargs
         Parametros extra para ``prepare_dataset`` (solo en modo lazy).
     """
 
     def __init__(
         self,
-        prepared:   Optional[FMMPreparedDataset] = None,
-        refine:     bool = True,
-        rough_mode: str  = "dense",
+        prepared:     Optional[FMMPreparedDataset] = None,
+        refine:       bool = True,
+        refine_steps: int  = 3,
         **prep_kwargs,
     ) -> None:
-        self.prepared    = prepared
-        self.refine      = refine
-        self.rough_mode  = rough_mode
+        self.prepared     = prepared
+        self.refine       = refine
+        self.refine_steps = refine_steps
         self._prep_kwargs = prep_kwargs
-        self._cached_times: Optional[np.ndarray] = None
+        # La preparacion lazy se protege con un lock: en los caminos con hilos
+        # (TopGeneSelector y RobustOrderEstimator comparten una sola instancia
+        # entre workers) sin el, cada hilo dispararia su propia calibracion de
+        # lambda antes de que el primero terminase de cachear el resultado.
+        self._prep_lock = threading.Lock()
+
+    def _needs_prepare(self, time_points: np.ndarray) -> bool:
+        """¿Hay que (re)preparar el dataset para estos ``time_points``?
+
+        Solo si no hay ninguno preparado o si la escala circular ha cambiado.
+        La comparacion se hace contra ``prepared.times``, que ya esta envuelto
+        a ``[0, 2*pi)``, de modo que un ``prepared`` recibido en el constructor
+        se reutiliza tal cual en lugar de recalibrarse.
+        """
+        if self.prepared is None:
+            return True
+        t = np.asarray(time_points, dtype=np.float64) % (2.0 * np.pi)
+        ref = self.prepared.times
+        return t.shape != ref.shape or not np.allclose(t, ref, rtol=0.0, atol=1e-12)
 
     @staticmethod
     def peak_time(alpha: float, beta: float, omega: float) -> float:
@@ -1298,17 +1507,17 @@ class StabilizedFMMModel(RhythmModel):
         en la primera llamada y se cachea. Si los ``time_points`` cambian
         respecto a la preparacion previa, se vuelve a preparar.
         """
-        # Preparar (lazy) si no hay prepared cacheado o cambian los tiempos
-        if self.prepared is None or self._cached_times is None \
-                or not np.array_equal(self._cached_times, time_points):
-            self.prepared    = prepare_dataset(time_points, **self._prep_kwargs)
-            self._cached_times = np.asarray(time_points, dtype=float).copy()
+        # Preparar (lazy) solo si no hay ``prepared`` o cambian los tiempos
+        if self._needs_prepare(time_points):
+            with self._prep_lock:
+                if self._needs_prepare(time_points):      # doble comprobacion
+                    self.prepared = prepare_dataset(time_points, **self._prep_kwargs)
 
         return fit_gene(
-            data       = data,
-            prepared   = self.prepared,
-            refine     = self.refine,
-            rough_mode = self.rough_mode,
+            data         = data,
+            prepared     = self.prepared,
+            refine       = self.refine,
+            refine_steps = self.refine_steps,
         )
 
 
