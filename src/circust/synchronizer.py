@@ -501,11 +501,15 @@ class CircularSynchronizer:
         direction_peak = peaks[direction_i]
         n_core         = len(core_genes)
 
-        # Contar genes en (0, π) excluyendo anchor y direction
+        # Contar genes con pico en el semicirculo [0, pi), excluyendo anchor y
+        # direction. El intervalo es el mismo que usa la clasificacion dia/noche
+        # de ``_pre_order``: antes uno abria en 0 y el otro lo cerraba, de modo
+        # que un pico exactamente en 0 contaba como "dia" pero no computaba
+        # aqui.
         peak_d = sum(
             1 for i, g in enumerate(core_genes)
             if g not in (self.anchor_gene, self.direction_gene)
-            and 0 < peaks[i] < pi
+            and 0 <= peaks[i] < pi
         )
         mitad = int(np.floor((n_core - 2) / 2))
 
@@ -517,6 +521,16 @@ class CircularSynchronizer:
             excl = (peaks[direction_i] < peaks[consistency_i] < peaks[anchor_i])
             flip = not excl
         elif aviso:
+            # Sin gen de consistencia la orientacion se invierte por defecto.
+            # Se avisa porque es una decision tomada sin evidencia: ocurre, por
+            # ejemplo, con el conjunto core de Ruben et al. (2018), que incluye
+            # CRY2 pero no CRY1.
+            self._log(
+                f"  AVISO: se ha producido una situacion de aviso sobre la "
+                f"orientacion y el gen de consistencia ({self.consistency_gene}) "
+                f"no esta entre los genes core disponibles. La orientacion se "
+                f"invierte por defecto, sin verificar la relacion de fases."
+            )
             flip = True
         else:
             flip = False

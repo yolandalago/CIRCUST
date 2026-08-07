@@ -13,7 +13,7 @@ Conjuntos predefinidos
 ----------------------
 - "circust"  Larriba et al. 2023  — 12 genes  (defecto de CIRCUST)
 - "zhang"    Zhang et al. 2014    — 10 genes
-- "ruben"   Ruben et al. 2018    — 54 genes  (lista pendiente de completar)
+- "ruben"    Ruben et al. 2018    — 54 genes de ciclado ubicuo en humano
 
 Uso tipico
 ----------
@@ -61,8 +61,32 @@ SEED_GENES_ZHANG: list[str] = [
     "USP2", "TSC22D3", "TSPAN4",
 ]
 
-# Ruben et al. (2018) — 54 genes. Completar a partir del Excel de la publicacion.
-SEED_GENES_RUBEN: list[str] = []
+# Ruben et al. (2018), los 54 genes de ciclado ubicuo en humano.
+#
+# Fuente: material suplementario de la publicacion, hoja
+# ``DatafileS2_HumanUbiquitousCycle`` de
+# ``data/NIHMS1725947-supplement-File_S2 54 cores.xlsx``. Son los genes que
+# ciclan en al menos 8 de los 13 tejidos del atlas. El orden es el del propio
+# fichero, por numero de tejidos en los que ciclan.
+#
+# La lista se transcribe aqui y no se lee del Excel en tiempo de ejecucion para
+# que importar este modulo no dependa de un fichero de datos ni de openpyxl, y
+# para que quede versionada y a la vista.
+#
+# AVISO: este conjunto no contiene CRY1, que es el gen de consistencia por
+# defecto de la etapa de sincronizacion. Con el conjunto de Ruben esa
+# verificacion se queda sin tercer gen y, segun la regla, invierte la
+# orientacion por defecto cuando se produce un aviso. ``CircularSynchronizer``
+# lo notifica por consola cuando ocurre.
+SEED_GENES_RUBEN: list[str] = [
+    "DBP", "NR1D2", "CIART", "CRY2", "GSTM2", "PER2", "PER3", "TEF", "ARNTL",
+    "FAM76A", "HLF", "BHLHE41", "IL11RA", "LDB1", "TCEA3", "TRIM45",
+    "ACOX2", "CHD6", "FAM117B", "GLT8D2", "MARVELD1", "NMNAT3", "OLFML1",
+    "PER1", "RTTN", "ANKRD6", "C1QTNF2", "CCNH", "CCNL1", "CHIC1", "DHRS12",
+    "EDA", "ELL", "ERF", "EVC", "FAM117A", "GSTM5", "IGSF8", "KDM6B",
+    "KIAA1328", "NFIL3", "NR3C2", "PARP2", "PPFIBP2", "PRDM5", "PRTFDC1",
+    "RBM43", "SEC16B", "SUN1", "TCEA2", "TTLL3", "UBA7", "ZBTB44", "ZSWIM6",
+]
 
 SEED_GENES_DEFAULT = SEED_GENES_CIRCUST
 
@@ -192,6 +216,17 @@ class CoreGeneSelector:
                 raise ValueError(
                     f"Preset '{preset}' desconocido. "
                     f"Opciones disponibles: {list(self.PRESETS)}"
+                )
+            # Un preset registrado pero sin genes falla mas tarde, en ``select``,
+            # con el mensaje "ningun gen core encontrado en la matriz", que
+            # apunta a la matriz de entrada y no a la causa real. Se detecta
+            # aqui para que el error senale al preset.
+            if not self.PRESETS[preset_lower]:
+                raise ValueError(
+                    f"El preset '{preset_lower}' esta registrado pero no "
+                    f"contiene ningun gen. Completa su lista en core_genes.py "
+                    f"o utiliza otro preset: "
+                    f"{[k for k, v in self.PRESETS.items() if v]}"
                 )
             self._genes_requested = list(self.PRESETS[preset_lower])
             self._preset_name     = preset_lower
