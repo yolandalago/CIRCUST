@@ -54,6 +54,8 @@ from circust.cpca                 import CPCA
 from circust.fitting.fmm          import FMMModel
 from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
 from circust.synchronizer        import CircularSynchronizer
+# top_genes solo depende de circust.fitting, asi que no hay ciclo.
+from circust.top_genes           import circular_median
 
 
 # ===========================================================================
@@ -188,11 +190,14 @@ class RobustOrderResult:
     Atributos -- orden final
     ------------------------
     sample_order : np.ndarray int, shape (n_muestras,)
-        Orden de muestras final (best_k o agregacion).
+        Orden de muestras final (best_k o agregacion). **Vacio con
+        ``method="median"``**: CIRCUST original no define ningun orden de
+        muestras consenso, calcula K y los descarta tras ajustar. Comprueba
+        ``sample_order.size`` antes de consumirlo.
     circular_scale : np.ndarray, shape (n_muestras,)
-        Escala circular del orden final.
+        Escala circular del orden final. Vacio con ``method="median"``.
     method_used : str
-        ``"best_k"`` o ``"aggregate"``.
+        ``"median"``, ``"best_k"`` o ``"aggregate"``.
     aggregation_method : str | None
         Metodo de agregacion ganador (``"tsp3"`` / ``"hods"``) si
         method=aggregate, None si best_k.
@@ -410,8 +415,11 @@ class RobustOrderEstimator:
         seed:                  int|None   = None,
         verbose:               bool  = True,
     ) -> None:
-        if method not in ("best_k", "aggregate"):
-            raise ValueError(f"method debe ser 'best_k' o 'aggregate', recibido: {method!r}")
+        if method not in ("median", "best_k", "aggregate"):
+            raise ValueError(
+                "method debe ser 'median', 'best_k' o 'aggregate', "
+                f"recibido: {method!r}"
+            )
         if selection_criterion not in ("r2_median", "n_well_fitted", "medoid"):
             raise ValueError(
                 "selection_criterion debe ser 'r2_median', 'n_well_fitted' o "
@@ -535,6 +543,39 @@ class RobustOrderEstimator:
         )
 
         # ── Fase B: Tarea 1 — eleccion del orden ──────────────────────
+        if self.method == "median":
+            # CIRCUST original (Larriba et al. 2023, paso 4). Agrega los
+            # parametros FMM por gen y NO define ningun orden de muestras
+            # consenso: los K ordenes se calculan, se usan para ajustar y se
+            # descartan. Por eso sample_order y circular_scale salen vacios,
+            # y es la razon de que este metodo no pueda entrar en las
+            # metricas de orden (rho, MAD), solo en las de atlas.
+            self._log("  Metodo 'median': mediana de los parametros FMM "
+                      "sobre las K repeticiones; sin orden de muestras.")
+            return RobustOrderResult(
+                sample_order       = np.array([], dtype=int),
+                circular_scale     = np.array([], dtype=np.float64),
+                method_used        = "median",
+                aggregation_method = None,
+                selected_rep       = None,
+                selection_criterion_used = None,
+                selection_score    = None,
+                sample_orders      = sample_orders,
+                circular_scales    = circ_scales,
+                direction_flipped  = flipped_arr,
+                stats_table        = stats_table,
+                per_rep_fmm_fit    = per_rep_fmm,
+                median_r2_per_rep  = median_r2,
+                n_well_fitted_per_rep = n_well_fitted,
+                selection_names    = sel_names,
+                pool_size          = pool_size,
+                n_excluded         = n_excluded,
+                top_gene_names     = names_top,
+                selected_fmm       = self._median_fmm_atlas(
+                    stats_table, names_top, K, n_top,
+                ),
+            )
+
         if self.method == "best_k":
             final_order, final_scale, sel_rep, sel_score = \
                 self._select_best_k(
@@ -1025,6 +1066,52 @@ class RobustOrderEstimator:
             "peak_phase_rad":   block[:, 5],   # t_U
             "trough_phase_rad": block[:, 6],   # t_L
             "r2_fmm":           block[:, 11],
+        })
+
+    def _median_fmm_atlas(
+        self,
+        stats_table: np.ndarray,
+        names_top:   list[str],
+        K:           int,
+        n_top:       int,
+    ) -> pd.DataFrame:
+        """Atlas de CIRCUST original: mediana por gen sobre las K repeticiones.
+
+        Es el paso 4 de Larriba et al. 2023: «[M_TOP] is the matrix that
+        contains for the genes in the TOP the median of the FMM features: R2,
+        tU and omega». Reproduce ``robustSincroDBP_v3_cores`` de la
+        implementacion de referencia, que agrega los parametros por gen y
+        descarta los K ordenes de muestras.
+
+        Los parametros angulares (alpha, beta, t_U, t_L) se agregan con
+        **mediana circular**, no aritmetica: son angulos en [0, 2*pi) y la
+        mediana ordinaria se rompe en el corte 0/2*pi (la mediana de 0.1 y
+        6.2 radianes es 3.15, diametralmente opuesta a las dos). El resto (M,
+        A, omega, R2) son escalares y llevan mediana ordinaria.
+
+        Columnas de ``stats_table`` (FMM): ``0=M, 1=A, 2=alpha, 3=beta,
+        4=omega, 5=t_U, 6=t_L, 11=R2``.
+        """
+        # (K*n_top, 12) -> (K, n_top, 12) para agregar en el eje de las reps.
+        # stats_table se rellena por bloques de rep: filas [k*n_top, (k+1)*n_top).
+        cubo = stats_table[:K * n_top].reshape(K, n_top, -1)
+
+        def med_lineal(col: int) -> np.ndarray:
+            return np.median(cubo[:, :, col], axis=0)
+
+        def med_circular(col: int) -> np.ndarray:
+            return np.array([circular_median(cubo[:, i, col]) for i in range(n_top)])
+
+        return pd.DataFrame({
+            "gene_name":        list(names_top),
+            "M":                med_lineal(0),
+            "amplitude":        med_lineal(1),
+            "alpha":            med_circular(2),
+            "beta":             med_circular(3),
+            "omega":            med_lineal(4),
+            "peak_phase_rad":   med_circular(5),   # t_U
+            "trough_phase_rad": med_circular(6),   # t_L
+            "r2_fmm":           med_lineal(11),
         })
 
     # ==================================================================

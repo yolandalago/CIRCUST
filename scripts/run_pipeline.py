@@ -191,10 +191,12 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
              "a TopGenes y RobustOrder. Por defecto: base.",
     )
     parser.add_argument(
-        "--robust-method", choices=["best_k", "aggregate"], default="best_k",
-        help="Como se elige el orden final entre las K repeticiones: "
-             "'best_k' (selecciona una repeticion) o 'aggregate' (TSP3/HODs). "
-             "Por defecto: best_k.",
+        "--robust-method", choices=["median", "best_k", "aggregate"],
+        default="best_k",
+        help="Como se resumen las K repeticiones: 'median' (CIRCUST original, "
+             "mediana de los parametros FMM por gen; NO produce orden de "
+             "muestras), 'best_k' (selecciona una repeticion) o 'aggregate' "
+             "(consenso TSP3/HODs de los K ordenes). Por defecto: best_k.",
     )
     parser.add_argument(
         "--selection-criterion",
@@ -225,11 +227,17 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
              "circmean.",
     )
     parser.add_argument(
-        "--top-fraction", type=float, default=None,
-        help="Porcentaje prefijado de genes que forman el conjunto TOP, como "
-             "fraccion en (0, 1]. Se toman los de mayor R2_FMM repartidos "
-             "entre los 4 sectores para preservar la cobertura circular. Por "
-             "defecto: sin cuota (todos los genes que superan los filtros).",
+        "--target-size", type=int, default=100,
+        help="Numero objetivo de genes del conjunto TOP. El cupo se reparte "
+             "entre los sectores y en cada uno se toman los de mayor R2_FMM, "
+             "para preservar la cobertura circular. Los genes core forzados se "
+             "anaden despues. Por defecto: 100.",
+    )
+    parser.add_argument(
+        "--n-sectors", type=int, default=8,
+        help="Numero de sectores circulares para la cobertura y el reparto del "
+             "cupo. El paper exige cubrir los 4 cuadrantes (minimo admisible); "
+             "la implementacion de referencia usa 8. Por defecto: 8.",
     )
     parser.add_argument(
         "--n-reps", type=int, default=5,
@@ -285,7 +293,11 @@ def _build_atlas(
     """
     top_names = list(robust_result.top_gene_names)
 
-    if robust_result.method_used == "best_k":
+    if robust_result.method_used in ("best_k", "median"):
+        # best_k : parametros de la rep elegida.
+        # median : mediana por gen sobre las K (CIRCUST original). En los dos
+        #          casos el atlas ya viene calculado en selected_fmm y no hay
+        #          nada que re-ajustar.
         raw = robust_result.selected_fmm[
             ["gene_name", "r2_fmm", "amplitude", "peak_phase_rad", "omega"]
         ].copy()
@@ -460,8 +472,8 @@ def main() -> None:
         r2_ori_threshold      = 0.5,
         r2_fmm_threshold      = 0.5,
         omega_min             = 0.1,
-        n_sectors             = 4,
-        top_fraction          = args.top_fraction,
+        n_sectors             = args.n_sectors,
+        target_size           = args.target_size,
         fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
         fmm_num_reps          = cfg["fmm_reps"],
@@ -518,16 +530,23 @@ def main() -> None:
     # seccion 2 de la propuesta). Es lo que se valida contra ground truth
     # (tiempos reales conocidos o TOD), como hace el paper original en
     # Fig 5 (skeletal muscle) y Fig 7A (baboons).
-    robust_names = [order_result.expr_ordered.columns[i]
-                    for i in robust_result.sample_order]
-    phases_rad   = np.asarray(robust_result.circular_scale, dtype=np.float64)
-    phases_h     = phases_rad * 24.0 / (2.0 * np.pi)
-    pd.DataFrame({
-        "sample_name":    robust_names,
-        "circular_phase": phases_rad,   # radianes en [0, 2*pi) — canonico
-        "phase_h":        phases_h,     # horas    en [0, 24)  — interpretable
-    }).to_csv(output_dir / "sample_order.csv", index=False)
-    print(f"    Saved: sample_order.csv  ({len(phases_rad)} muestras)")
+    if robust_result.sample_order.size == 0:
+        # method="median" (CIRCUST original) no produce orden de muestras: las
+        # K ordenaciones se usan para ajustar y se descartan. No se escribe un
+        # fichero vacio que luego parezca un fallo.
+        print("    sample_order.csv NO se escribe: el metodo 'median' no "
+              "define un orden de muestras consenso.")
+    else:
+        robust_names = [order_result.expr_ordered.columns[i]
+                        for i in robust_result.sample_order]
+        phases_rad   = np.asarray(robust_result.circular_scale, dtype=np.float64)
+        phases_h     = phases_rad * 24.0 / (2.0 * np.pi)
+        pd.DataFrame({
+            "sample_name":    robust_names,
+            "circular_phase": phases_rad,   # radianes en [0, 2*pi) — canonico
+            "phase_h":        phases_h,     # horas    en [0, 24)  — interpretable
+        }).to_csv(output_dir / "sample_order.csv", index=False)
+        print(f"    Saved: sample_order.csv  ({len(phases_rad)} muestras)")
 
     # ─────────────────────────────────────────────────────────────────────
     # Salida 2: [M^TOP] — atlas circadiano del tejido (UNA FILA POR GEN)
@@ -567,6 +586,8 @@ def main() -> None:
             "aggregation":   (args.aggregation
                               if args.robust_method == "aggregate" else None),
             "n_reps":        args.n_reps,
+            "n_sectors":     args.n_sectors,
+            "target_size":   args.target_size,
             "lambda_star":   cpca_result.lambda_star,
         },
         "seed":      args.seed,
