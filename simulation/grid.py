@@ -108,6 +108,11 @@ SEED_BASE: dict[str, int] = {
 # que es de sobra para las 20 previstas.
 PASO_CELDA: int = 100
 
+# Directorio de trabajo de la rejilla. Cuelga de ``output`` porque nada de lo
+# que produce se versiona: las matrices son regenerables desde su manifiesto y
+# los resultados desde la rejilla.
+RAIZ_POR_DEFECTO: Path = Path("output") / "simulacion"
+
 
 @dataclass(frozen=True)
 class Celda:
@@ -189,7 +194,7 @@ def vecinos_snr(snr: float) -> tuple[float, float, float]:
     return GRID_SNR[i - 1:i + 2]
 
 
-def ruta_de(celda: Celda, replica: int, raiz: Path | str = Path("output")
+def ruta_de(celda: Celda, replica: int, raiz: Path | str = RAIZ_POR_DEFECTO
             ) -> Path:
     """Directorio de una replica concreta."""
     return Path(raiz) / celda.bloque / celda.nombre / f"rep{replica:02d}"
