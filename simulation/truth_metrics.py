@@ -164,8 +164,8 @@ def error_omega(atlas: pd.DataFrame, params: pd.DataFrame) -> dict:
     FMM base. Un error absoluto pequeno con sesgo nulo y un error absoluto
     pequeno con sesgo sistematico son situaciones muy distintas.
 
-    Devuelve NaN si el atlas no trae la columna, que es el caso de los metodos
-    de agregacion mientras ``atlas_de`` solo reconstruya la fase de pico.
+    Devuelve NaN si el atlas no trae la columna, en vez de fallar, para que un
+    atlas reducido a las fases de pico siga siendo evaluable en lo demas.
     """
     if "omega" not in atlas.columns:
         return {"verdad_omega_medae": np.nan, "verdad_omega_sesgo": np.nan,

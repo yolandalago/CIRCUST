@@ -86,7 +86,8 @@ from circust.top_genes import TopGeneSelector, _fit_fmm_one, _fit_fmm_one_stab
 from circust.robust_order import RobustOrderEstimator
 from circust.core_genes import CoreGeneSelector
 from validation.metrics import (
-    align_phases_by_mad, circular_abs_diff, circular_regression_rho,
+    align_phases_by_mad, circular_abs_diff, circular_correlation,
+    circular_regression_rho,
 )
 from validation.sweep_top import CFG, R2_ORI, R2_FMM, OMEGA_MIN, descubrir
 
@@ -108,23 +109,62 @@ def ruta_salida(datos: Path) -> Path:
     return ROOT / "validation" / "resultados" / f"compare_methods_{datos.name}.csv"
 
 
-def ajustar_picos(filas: np.ndarray, escala: np.ndarray, fmm_method: str,
-                  lambda_star: float | None) -> list[float]:
-    """Fase de pico t_U de cada fila de expresion sobre la escala circular dada."""
+def resolver_metodos(seleccion=None) -> list[tuple[str, dict]]:
+    """Subconjunto de :data:`METODOS`, por etiqueta o explicito.
+
+    Los bloques del estudio de simulacion congelan a proposito parte de la
+    configuracion, el bloque R el resumen robusto y el bloque A el modelo FMM,
+    de modo que cada uno necesita evaluar solo una parte de las seis
+    combinaciones. Aceptar tambien pares ``(etiqueta, kwargs)`` explicitos
+    permite ademas el barrido de tau, que repite un mismo metodo variando un
+    unico parametro.
+    """
+    if seleccion is None:
+        return list(METODOS)
+    if isinstance(seleccion, str):
+        seleccion = [seleccion]
+
+    conocidos = dict(METODOS)
+    salida = []
+    for item in seleccion:
+        if isinstance(item, tuple):
+            salida.append(item)
+        elif item in conocidos:
+            salida.append((item, conocidos[item]))
+        else:
+            raise ValueError(
+                f"metodo {item!r} desconocido, los disponibles son "
+                f"{tuple(conocidos)}.")
+    return salida
+
+
+def ajustar_fmm(filas: np.ndarray, escala: np.ndarray, fmm_method: str,
+                lambda_star: float | None) -> list[tuple]:
+    """Ajusta FMM a cada fila sobre la escala circular dada.
+
+    Devuelve las tuplas completas ``(peak_time, omega, r2, A)``, no solo el
+    pico, porque omega es la magnitud que juzga la regularizacion del modelo y
+    hace falta para comparar contra el apuntamiento verdadero.
+    """
     if fmm_method == "base":
         from joblib import Parallel, delayed
-        ajustes = Parallel(n_jobs=-1)(
+        return Parallel(n_jobs=-1)(
             delayed(_fit_fmm_one)(filas[i], escala, CFG["fmm_alpha_grid"],
                                   CFG["fmm_omega_grid"], CFG["fmm_reps"])
             for i in range(len(filas))
         )
-    else:
-        from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
-        kw = {} if lambda_star is None else {"lambda_star": float(lambda_star)}
-        modelo = StabilizedFMMModel(prepared=prepare_dataset(escala, **kw))
-        ajustes = [_fit_fmm_one_stab(filas[i], escala, modelo)
-                   for i in range(len(filas))]
-    return [float(a[0]) for a in ajustes]
+    from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
+    kw = {} if lambda_star is None else {"lambda_star": float(lambda_star)}
+    modelo = StabilizedFMMModel(prepared=prepare_dataset(escala, **kw))
+    return [_fit_fmm_one_stab(filas[i], escala, modelo)
+            for i in range(len(filas))]
+
+
+def ajustar_picos(filas: np.ndarray, escala: np.ndarray, fmm_method: str,
+                  lambda_star: float | None) -> list[float]:
+    """Fase de pico t_U de cada fila de expresion sobre la escala circular dada."""
+    return [float(a[0])
+            for a in ajustar_fmm(filas, escala, fmm_method, lambda_star)]
 
 
 def picos_de_referencia(expr: pd.DataFrame, genes: list[str], reales_h: np.ndarray,
@@ -174,6 +214,10 @@ def atlas_de(rob, top, fmm_method: str, lambda_star) -> pd.DataFrame:
     ``median`` y ``best_k`` lo traen calculado en ``selected_fmm``.
     ``aggregate`` no, porque el orden consenso no coincide con ninguna
     repeticion y hay que reajustar FMM sobre el.
+
+    El reajuste conserva omega y R2 ademas de la fase de pico. Antes solo
+    devolvia la fase, lo que dejaba a los metodos de agregacion sin poder
+    compararse en apuntamiento con el resto.
     """
     if rob.method_used in ("median", "best_k"):
         return rob.selected_fmm
@@ -182,15 +226,88 @@ def atlas_de(rob, top, fmm_method: str, lambda_star) -> pd.DataFrame:
     filas = (top.candidate_matrix.iloc[:, rob.sample_order]
              .loc[nombres].to_numpy(dtype=np.float64))
     escala = np.asarray(rob.circular_scale, dtype=np.float64)
+    ajustes = ajustar_fmm(filas, escala, fmm_method, lambda_star)
     return pd.DataFrame({
         "gene_name":      nombres,
-        "peak_phase_rad": ajustar_picos(filas, escala, fmm_method, lambda_star),
+        "peak_phase_rad": [float(a[0]) for a in ajustes],
+        "omega":          [float(a[1]) for a in ajustes],
+        "r2_fmm":         [float(a[2]) for a in ajustes],
+        "amplitude":      [float(a[3]) for a in ajustes],
     })
 
 
+def sd_rho_reps(rob, columnas: list[str],
+                tiempos_h: dict[str, float]) -> float:
+    """Desviacion tipica de rho entre las K repeticiones de la etapa robusta.
+
+    Es la variable que decide si agregar tiene sentido. Si las K repeticiones
+    coinciden no hay desacuerdo que resolver y cualquier metodo de consenso
+    devuelve lo mismo que elegir una cualquiera, de modo que un estudio montado
+    en ese regimen concluiria que la agregacion no sirve cuando lo que ocurre
+    es que no se le ha dado nada que agregar.
+
+    Sobre los 47 tejidos de babuino vale 0,012 y la agregacion no aporta. Sobre
+    GSE71620, con 146 muestras, esta entre 0,03 y 0,15, que es el regimen donde
+    si tiene algo que hacer.
+
+    Las repeticiones ya vienen con la orientacion unificada, luego sus rho son
+    directamente comparables entre si.
+    """
+    ordenes = getattr(rob, "sample_orders", None)
+    escalas = getattr(rob, "circular_scales", None)
+    if (ordenes is None or getattr(ordenes, "ndim", 0) != 2
+            or ordenes.shape[0] < 2):
+        return float("nan")
+
+    rhos = []
+    for k in range(ordenes.shape[0]):
+        est_h = np.asarray(escalas[k], dtype=np.float64) * 24 / (2 * np.pi)
+        ver_h = np.array([tiempos_h[columnas[i]] for i in ordenes[k]])
+        rhos.append(float(circular_regression_rho(est_h, ver_h)))
+
+    rhos = np.asarray(rhos, dtype=np.float64)
+    if np.count_nonzero(~np.isnan(rhos)) < 2:
+        return float("nan")
+    return float(np.nanstd(rhos, ddof=1))
+
+
 def comparar_unidad(nombre: str, matriz: Path, tiempos_h: dict[str, float],
-                    target_sizes: list[int], fmm_methods: list[str]) -> list[dict]:
-    mat  = load_expression_matrix(str(matriz), gene_column=None)
+                    target_sizes: list[int], fmm_methods: list[str], *,
+                    metodos=None, gene_column: str | None = None,
+                    robust_kwargs: dict | None = None,
+                    con_referencia: bool = True,
+                    extra=None) -> list[dict]:
+    """Evalua una unidad con todas las combinaciones pedidas.
+
+    Parameters
+    ----------
+    metodos
+        Subconjunto de :data:`METODOS`, ver :func:`resolver_metodos`. Por
+        defecto los seis.
+    gene_column
+        Columna con los identificadores de gen. Los datos reales la traen como
+        indice y no hace falta, pero Parquet exige indicarla, y las celdas
+        sinteticas se escriben en ese formato.
+    robust_kwargs
+        Parametros extra para ``RobustOrderEstimator``, que sobrescriben a los
+        de la combinacion. Es la via del barrido de tau, que repite un mismo
+        metodo variando ``selection_r2_threshold``.
+    con_referencia
+        Calcula el error de picos contra una referencia estimada ajustando FMM
+        sobre los tiempos reales. Es la unica opcion con datos reales, pero
+        cuesta un ajuste FMM completo sobre el conjunto TOP y sobra cuando se
+        conocen los parametros verdaderos.
+    extra
+        Funcion opcional ``(rob, top, atlas, fmm_method) -> dict`` cuyo
+        resultado se anade a la fila. Existe para que las metricas contra el
+        ground truth sintetico puedan engancharse aqui sin que este modulo
+        tenga que importar nada de ``simulation``, que dependeria en el sentido
+        contrario al que corresponde.
+    """
+    metodos = resolver_metodos(metodos)
+    robust_kwargs = robust_kwargs or {}
+
+    mat  = load_expression_matrix(str(matriz), gene_column=gene_column)
     prep = Preprocessor(sparse_threshold=0.3, verbose=False).run(mat)
     core = CoreGeneSelector.from_string(None).select(prep.expr_norm).genes
 
@@ -224,13 +341,17 @@ def comparar_unidad(nombre: str, matriz: Path, tiempos_h: dict[str, float],
                   seed_genes=encontrados, sample_order=orden.sample_order,
                   fit_cache=cache)
 
-            referencia = picos_de_referencia(orden.expr_ordered,
-                                             list(top.gene_names), reales,
-                                             fmm_method, cpca.lambda_star)
+            referencia = (
+                picos_de_referencia(orden.expr_ordered, list(top.gene_names),
+                                    reales, fmm_method, cpca.lambda_star)
+                if con_referencia else {})
 
-            for etiqueta, kwargs in METODOS:
+            for etiqueta, kwargs in metodos:
                 t0 = time.perf_counter()
-                rob = RobustOrderEstimator(
+                # Todo por un unico diccionario para que robust_kwargs pueda
+                # sobrescribir cualquier valor, incluido el umbral tau, sin
+                # chocar con un argumento cableado.
+                ajustes_robusto = dict(
                     n_reps=K, sample_size_fraction=2.0 / 3.0,
                     selection_r2_threshold=0.65, r2_min=0.5,
                     anchor_gene=CFG["anchor_gene"],
@@ -239,27 +360,47 @@ def comparar_unidad(nombre: str, matriz: Path, tiempos_h: dict[str, float],
                     fmm_length_omega_grid=CFG["fmm_omega_grid"],
                     fmm_num_reps=CFG["fmm_reps"], fmm_method=fmm_method,
                     lambda_star=cpca.lambda_star, n_jobs=-1, seed=SEED,
-                    verbose=False, **kwargs,
-                ).run(top_result=top, expr_full_norm=orden.expr_ordered,
-                      core_genes=encontrados)
+                    verbose=False,
+                )
+                ajustes_robusto.update(kwargs)
+                ajustes_robusto.update(robust_kwargs)
+                rob = RobustOrderEstimator(**ajustes_robusto).run(
+                    top_result=top, expr_full_norm=orden.expr_ordered,
+                    core_genes=encontrados)
                 segundos = time.perf_counter() - t0
 
+                atlas = atlas_de(rob, top, fmm_method, cpca.lambda_star)
                 fila = {"unidad": nombre, "n_muestras": len(columnas),
                         "fmm_method": fmm_method, "target_size": objetivo,
                         "n_top": len(top.gene_names), "metodo": etiqueta,
-                        "segundos": segundos}
-                fila.update(error_de_picos(
-                    atlas_de(rob, top, fmm_method, cpca.lambda_star), referencia))
+                        "segundos": segundos,
+                        "sd_rho_reps": sd_rho_reps(rob, columnas, tiempos_h)}
+                if con_referencia:
+                    fila.update(error_de_picos(atlas, referencia))
 
                 if rob.sample_order.size == 0:
                     # 'median' no define orden: NaN a proposito, no por fallo.
-                    fila.update({"rho": np.nan, "mad_h": np.nan})
+                    fila.update({"rho": np.nan, "circ_corr": np.nan,
+                                 "mad_h": np.nan})
                 else:
                     est_h = np.asarray(rob.circular_scale) * 24 / (2 * np.pi)
                     ver_h = np.array([tiempos_h[columnas[i]]
                                       for i in rob.sample_order])
-                    fila["rho"]   = float(circular_regression_rho(est_h, ver_h))
-                    fila["mad_h"] = float(align_phases_by_mad(est_h, ver_h).mad)
+                    fila["rho"] = float(circular_regression_rho(est_h, ver_h))
+                    # circ_corr y mad_h son EXACTAMENTE las dos metricas con las
+                    # que el articulo compara CIRCUST contra CHIRAL sobre el
+                    # musculo esqueletico (corr 0,798 vs 0,752; MAD 0,872 vs
+                    # 0,875), de modo que son las unicas comparables de tu a tu
+                    # con lo publicado. Se alinea antes, porque la fase solo
+                    # esta definida salvo rotacion y reflexion.
+                    ali = align_phases_by_mad(est_h, ver_h)
+                    fila["circ_corr"] = float(
+                        circular_correlation(ali.aligned_pred, ver_h))
+                    fila["mad_h"] = float(ali.mad)
+
+                if extra is not None:
+                    fila.update(extra(rob=rob, top=top, atlas=atlas,
+                                      fmm_method=fmm_method))
                 filas.append(fila)
     return filas
 
@@ -278,9 +419,15 @@ def analizar(datos: Path) -> None:
     for col, titulo, sentido in [
         ("picos_medae_h", "ATLAS - error mediano de las fases de pico (h)", "menor mejor"),
         ("rho",           "ORDEN - rho de regresion circular-circular",     "mayor mejor"),
+        ("circ_corr",     "ORDEN - correlacion circular (metrica del articulo)", "mayor mejor"),
         ("mad_h",         "ORDEN - MAD frente a los tiempos reales (h)",    "menor mejor"),
+        ("sd_rho_reps",   "DESACUERDO - sd de rho entre las K repeticiones", "informativo"),
         ("segundos",      "COSTE - segundos de la etapa robusta",           "menor mejor"),
     ]:
+        # Los resultados anteriores a que se anadiese una metrica no la traen,
+        # y no es motivo para no poder analizarlos.
+        if col not in d.columns:
+            continue
         print(f"\n{titulo}   ({sentido})")
         t = d.pivot_table(index="metodo", columns=["fmm_method", "target_size"],
                           values=col, aggfunc="median").reindex(orden_m)
