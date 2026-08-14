@@ -601,12 +601,18 @@ def generate(
         matrix=matriz,
         true_times_h=t_h,
         gene_params=params,
+        # El manifiesto tiene que bastar para reconstruir la celda, de ahi que
+        # incluya tambien ``name`` y los ``sampling_kwargs``, que no son
+        # argumentos con nombre de esta funcion y se perderian si no.
         meta=dict(
+            name=name,
             seed=seed, n_samples=n, n_genes=n_genes,
             prop_rhythmic=prop_rhythmic, sampling=sampling,
+            sampling_kwargs=dict(sampling_kwargs),
             waveform_mix=waveform_mix, omega=omega,
             omega_jitter=omega_jitter, beta_mode=beta_mode,
             snr=snr, core_phase_sd_h=core_phase_sd_h, period=period,
+            n_rhythmic=n_rhythmic,
             ruido="gaussiano independiente, relativo a la amplitud",
         ),
     )
