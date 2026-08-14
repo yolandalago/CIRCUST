@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validation/generate.py
+simulation/generate.py
 ======================
 Generador de conjuntos sinteticos de expresion circadiana para el estudio de
 simulacion.
@@ -28,6 +28,10 @@ Composicion de la matriz
 2. El resto de genes ritmicos, con fase uniforme sobre el ciclo.
 3. Genes no ritmicos, ruido puro.
 
+La forma de onda de los genes ritmicos no es unica, sino una mezcla de clases
+con proporciones configurables (ver ``WAVEFORM_CLASSES``), porque en un tejido
+real conviven perfiles sinusoidales y perfiles muy apuntados.
+
 Ruido
 -----
 De momento gaussiano e independiente por gen, relativo a la amplitud, como en
@@ -44,7 +48,148 @@ import pandas as pd
 
 PERIOD_HOURS: float = 24.0
 
-SAMPLING_SCHEMES = ("equiespaciado", "huecos", "concentrado")
+SAMPLING_SCHEMES = ("equiespaciado", "aleatorio", "huecos", "concentrado")
+
+
+# ===========================================================================
+# Clases de forma de onda
+# ===========================================================================
+#
+# El parametro de apuntamiento ``omega`` del modelo FMM gobierna la forma de la
+# onda: en ``omega = 1`` la senal es una sinusoide simetrica y al bajar se
+# vuelve progresivamente mas apuntada y asimetrica. Es el factor central del
+# estudio, porque un coseno puro no daria nada que capturar a la estimacion
+# estabilizada.
+#
+# De donde salen estos cuatro valores
+# -----------------------------------
+# No son elegidos a ojo. Se midio la distribucion empirica de ``omega`` sobre
+# los atlas ya calculados en ``output/``, quedandose con los genes de
+# R2_FMM >= 0,5, y se tomaron como representantes los centros de los cuatro
+# tramos observados. El reparto medido fue:
+#
+#   clase          omega   GTEx 480 muestras   Babuino 12 muestras
+#                          (FMM base)          base      stabilized
+#   sinusoidal     0,85         22,6 %          5,0 %       8,8 %
+#   moderado       0,65         60,9 %         13,3 %      41,9 %
+#   apuntado       0,45         16,4 %         28,6 %      41,6 %
+#   muy_apuntado   0,20          0,2 %         53,1 %       7,7 %
+#   mediana                      0,66           0,31        0,58
+#
+# La lectura importa para el diseno del estudio. En GTEx, con 480 muestras,
+# omega se concentra en 0,66 y practicamente no hay genes por debajo de 0,4. En
+# babuino, con 12 muestras, mas de la mitad caen en el extremo apuntado, y al
+# reajustar ese mismo babuino con el FMM estabilizado la mediana sube de 0,31 a
+# 0,58 y el bulto extremo se desploma del 53 % al 8 %.
+#
+# Es decir, los omega muy bajos del babuino no son biologia sino el estimador
+# base sobreajustando con pocas muestras, que es justo la patologia que la
+# regularizacion corrige.
+#
+# Consecuencia metodologica: la verdad de la simulacion se calibra con GTEx y
+# no con babuino. Generar datos con omega 0,2 porque el babuino lo estima seria
+# simular un artefacto de estimacion para despues felicitarse por corregirlo.
+# La distribucion del babuino se usa solo para orientar las mezclas de estres.
+WAVEFORM_CLASSES: dict[str, float] = {
+    "sinusoidal":   0.85,
+    "moderado":     0.65,
+    "apuntado":     0.45,
+    "muy_apuntado": 0.20,
+}
+
+# Mezclas predefinidas, como proporciones sobre las clases anteriores.
+#
+# ``simetrica``   control. El extremo simetrico observado en GTEx. Es donde la
+#                 estimacion estabilizada no deberia aportar nada, y sirve para
+#                 comprobar que tampoco perjudica.
+# ``gtex``        referencia. Reproduce el histograma medido sobre GTEx.
+# ``apuntada``    estres en la direccion que senala el babuino, todavia dentro
+#                 de lo plausible.
+# ``extrema``     limite superior deliberado, del orden del patron Asymm del
+#                 material suplementario de CIRCUST. No pretende ser realista.
+WAVEFORM_MIXES: dict[str, dict[str, float]] = {
+    "simetrica": {"sinusoidal": 1.00},
+    "gtex":      {"sinusoidal": 0.20, "moderado": 0.60, "apuntado": 0.20},
+    "apuntada":  {"moderado": 0.25, "apuntado": 0.45, "muy_apuntado": 0.30},
+    "extrema":   {"apuntado": 0.30, "muy_apuntado": 0.70},
+}
+
+
+def assign_waveform_classes(
+    n:      int,
+    mix:    str | dict[str, float],
+    rng:    np.random.Generator,
+    jitter: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reparte ``n`` genes entre las clases de forma de onda.
+
+    Parameters
+    ----------
+    n
+        Numero de genes ritmicos a repartir.
+    mix
+        Nombre de una mezcla de :data:`WAVEFORM_MIXES`, o un diccionario de
+        proporciones sobre :data:`WAVEFORM_CLASSES` que sume uno.
+    jitter
+        Desviacion tipica con que se dispersa ``omega`` dentro de cada clase,
+        para que los genes de una misma clase no compartan exactamente la misma
+        forma. Con cero todos los genes de una clase son identicos.
+
+    Returns
+    -------
+    clases, omegas
+        Dos vectores de longitud ``n``, alineados. ``clases`` es de tipo objeto
+        para poder llevarlo tal cual a ``gene_params``.
+
+    Notes
+    -----
+    El reparto es **deterministico por resto mayor**, no multinomial. Con 20
+    replicas por celda un reparto aleatorio anadiria una fuente de variabilidad
+    que no interesa medir y que confundiria el efecto de la mezcla con el ruido
+    del propio reparto. Asi, la composicion de la matriz es exactamente la
+    declarada y lo unico que varia entre replicas son las fases, las amplitudes
+    y el ruido.
+    """
+    if isinstance(mix, str):
+        if mix not in WAVEFORM_MIXES:
+            raise ValueError(
+                f"mezcla {mix!r} desconocida, las disponibles son "
+                f"{tuple(WAVEFORM_MIXES)}."
+            )
+        mix = WAVEFORM_MIXES[mix]
+
+    desconocidas = set(mix) - set(WAVEFORM_CLASSES)
+    if desconocidas:
+        raise ValueError(
+            f"clases {sorted(desconocidas)} desconocidas, las disponibles son "
+            f"{tuple(WAVEFORM_CLASSES)}."
+        )
+    if abs(sum(mix.values()) - 1.0) > 1e-9:
+        raise ValueError(
+            f"las proporciones de la mezcla deben sumar uno, suma "
+            f"{sum(mix.values())}."
+        )
+
+    nombres = list(mix)
+    exacto = np.array([n * mix[c] for c in nombres])
+    cupo = np.floor(exacto).astype(int)
+    # Resto mayor: los genes que sobran tras truncar van a las clases cuya
+    # parte fraccionaria se quedo mas cerca de subir.
+    faltan = n - int(cupo.sum())
+    if faltan:
+        orden = np.argsort(-(exacto - cupo), kind="stable")
+        cupo[orden[:faltan]] += 1
+
+    clases = np.repeat(np.array(nombres, dtype=object), cupo)
+    omegas = np.array([WAVEFORM_CLASSES[c] for c in clases], dtype=float)
+    if jitter > 0.0:
+        omegas = omegas + rng.normal(0.0, jitter, size=n)
+    # El limite inferior evita que el jitter genere omegas degenerados, que no
+    # corresponden a ninguna forma de onda observable.
+    omegas = np.clip(omegas, 0.05, 1.0)
+
+    permutacion = rng.permutation(n)
+    return clases[permutacion], omegas[permutacion]
 
 
 # ===========================================================================
@@ -232,6 +377,12 @@ def sampling_times(
         Cobertura uniforme del ciclo. Es el caso favorable y sirve de
         referencia.
 
+    ``aleatorio``
+        Instantes uniformes al azar sobre el ciclo. Es exactamente la condicion
+        no equiespaciada del material suplementario de CIRCUST, de modo que
+        permite reproducir su escenario antes de pasar a los dos regimenes que
+        ellos no probaron.
+
     ``huecos``
         Cobertura uniforme salvo una ventana sin observar. Reproduce el diseno
         con lagunas, donde la transicion de la fase puede caer integramente
@@ -245,6 +396,9 @@ def sampling_times(
     """
     if scheme == "equiespaciado":
         t = np.linspace(0.0, period, n_samples, endpoint=False)
+
+    elif scheme == "aleatorio":
+        t = rng.uniform(0.0, period, size=n_samples)
 
     elif scheme == "huecos":
         lo, hi = gap
@@ -291,7 +445,8 @@ def generate(
     n_genes:         int   = 2000,
     prop_rhythmic:   float = 0.05,
     sampling:        str   = "equiespaciado",
-    omega:           float = 1.00,
+    waveform_mix:    str | dict[str, float] | None = None,
+    omega:           float | None = None,
     omega_jitter:    float = 0.05,
     beta_mode:       str   = "aleatorio",
     snr:             float = 3.0,
@@ -312,13 +467,18 @@ def generate(
         habitual en tejido real.
     sampling
         Uno de :data:`SAMPLING_SCHEMES`.
+    waveform_mix
+        Mezcla de clases de forma de onda, por nombre o como diccionario de
+        proporciones. Es el modo normal de uso y el factor principal del
+        estudio. Por defecto ``"gtex"``, que reproduce el histograma de omega
+        medido sobre datos reales.
     omega
-        Apuntamiento de la forma de onda. ``1`` es la sinusoide simetrica y
-        valores menores producen perfiles progresivamente mas apuntados y
-        asimetricos. Es el factor principal del estudio.
+        Alternativa a ``waveform_mix`` que asigna un unico apuntamiento a todos
+        los genes ritmicos. Se conserva como caso controlado de un solo tipo de
+        gen. Es incompatible con ``waveform_mix``.
     omega_jitter
-        Dispersion de ``omega`` entre genes, para que no todos compartan
-        exactamente la misma forma.
+        Dispersion de ``omega`` dentro de cada clase, para que los genes de una
+        misma clase no compartan exactamente la misma forma.
     beta_mode
         ``"aleatorio"`` sortea ``beta`` uniformemente, de modo que la asimetria
         apunte tanto al maximo como al minimo. ``"cero"`` lo fija en cero, que
@@ -338,8 +498,15 @@ def generate(
     """
     if not 0.0 < prop_rhythmic <= 1.0:
         raise ValueError(f"prop_rhythmic debe estar en (0, 1], recibido {prop_rhythmic}.")
-    if not 0.0 < omega <= 1.0:
+    if omega is not None and waveform_mix is not None:
+        raise ValueError(
+            "omega y waveform_mix son excluyentes: o una mezcla de clases de "
+            "forma de onda, o un unico apuntamiento para todos los genes."
+        )
+    if omega is not None and not 0.0 < omega <= 1.0:
         raise ValueError(f"omega debe estar en (0, 1], recibido {omega}.")
+    if omega is None and waveform_mix is None:
+        waveform_mix = "gtex"
 
     rng = np.random.default_rng(seed)
     two_pi = 2.0 * np.pi
@@ -382,9 +549,16 @@ def generate(
     for i in range(len(core), n_rhythmic):
         fuente[i] = "uniforme"
 
-    # Forma de onda comun a todos los ritmicos, con dispersion
+    # Forma de onda de los ritmicos
     r = slice(0, n_rhythmic)
-    om[r] = np.clip(rng.normal(omega, omega_jitter, size=n_rhythmic), 0.05, 1.0)
+    clase = np.array(["-"] * n_genes, dtype=object)
+    if waveform_mix is not None:
+        clase[r], om[r] = assign_waveform_classes(
+            n_rhythmic, waveform_mix, rng, omega_jitter)
+    else:
+        clase[r] = "manual"
+        om[r] = np.clip(
+            rng.normal(omega, omega_jitter, size=n_rhythmic), 0.05, 1.0)
     bet[r] = (rng.uniform(0.0, two_pi, size=n_rhythmic) if beta_mode == "aleatorio"
               else np.zeros(n_rhythmic))
     # alpha se despeja para que el pico caiga en t_u
@@ -413,6 +587,7 @@ def generate(
         "gene":       nombres,
         "ritmico":    [True] * n_rhythmic + [False] * (n_genes - n_rhythmic),
         "fuente_fase": fuente,
+        "clase":      clase,
         "amplitud":   amp,
         "alpha":      alp,
         "beta":       bet,
@@ -429,7 +604,8 @@ def generate(
         meta=dict(
             seed=seed, n_samples=n, n_genes=n_genes,
             prop_rhythmic=prop_rhythmic, sampling=sampling,
-            omega=omega, omega_jitter=omega_jitter, beta_mode=beta_mode,
+            waveform_mix=waveform_mix, omega=omega,
+            omega_jitter=omega_jitter, beta_mode=beta_mode,
             snr=snr, core_phase_sd_h=core_phase_sd_h, period=period,
             ruido="gaussiano independiente, relativo a la amplitud",
         ),
