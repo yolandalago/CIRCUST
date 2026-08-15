@@ -86,11 +86,25 @@ def test_los_demas_bloques_no_conservan_las_matrices():
         assert not c.conservar_matriz
 
 
-def test_el_bloque_r_cruza_los_cuatro_muestreos_por_las_cuatro_mezclas():
+def test_el_bloque_r_cruza_muestreo_por_mezcla_por_tamano_muestral():
     celdas = bloque_r()
-    assert len(celdas) == 16
+    assert len(celdas) == 48
     assert {c.generate["sampling"] for c in celdas} == set(SAMPLING_SCHEMES)
     assert {c.generate["waveform_mix"] for c in celdas} == set(WAVEFORM_MIXES)
+    assert {c.generate["n_samples"] for c in celdas} == {12, 48, 192}
+
+
+def test_el_bloque_r_usa_su_propia_ancla_y_no_la_calibrada():
+    """El ancla de la fase 0 se calibro para el bloque A, no para este.
+
+    Con SNR 1 y 1 por ciento de ritmicos las celdas de 192 muestras no corren,
+    porque el conjunto TOP colapsa, de modo que heredarla dejaria en blanco un
+    tercio del bloque. Sondeado el 15/08/2026.
+    """
+    calibrada = {**REFERENCIA, "snr": 1.0, "prop_rhythmic": 0.01}
+    for c in bloque_r(calibrada):
+        assert c.generate["snr"] == 2.0
+        assert c.generate["prop_rhythmic"] == 0.05
 
 
 def test_el_bloque_r_congela_el_resumen_robusto_y_mueve_el_fmm():

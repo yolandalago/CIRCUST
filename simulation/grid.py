@@ -336,17 +336,51 @@ def bloque_p() -> list[Celda]:
 # Bloque R: regularizacion del FMM
 # ===========================================================================
 
+# Ancla propia del bloque R, sondeada el 15/08/2026 sobre su esquina mas dura
+# (muestreo con huecos y mezcla extrema).
+#
+# Por que no hereda la celda de referencia calibrada. Los tres criterios de la
+# fase 0 se fijaron pensando en el bloque A, y en particular el del desacuerdo
+# entre las K repeticiones, que al bloque R le da igual porque congela el
+# resumen robusto. Heredarla traeria dos problemas: un conjunto TOP de unos 19
+# genes, demasiado pobre para comparar dos modelos de ajuste, y sobre todo que
+# con SNR 1 y 5 por ciento de ritmicos las celdas de 192 muestras NO CORREN,
+# de modo que un tercio del bloque saldria en blanco.
+#
+# Con SNR 2 y 5 por ciento corren los tres tamanos con un TOP de unos 108 genes
+# y rho entre 0,85 y 0,94. Que la ordenacion sea buena es aqui una ventaja y no
+# un problema: aisla la comparacion entre los dos estimadores FMM del error de
+# reconstruir el orden, que es una fuente de variacion ajena a lo que el bloque
+# mide. Y la patologia que si importa sigue presente, porque con 12 muestras el
+# TOP se llena igualmente hasta 110 genes con material sobreajustado.
+R_SNR:      float             = 2.0
+R_PROP:     float             = 0.05
+R_MUESTRAS: tuple[int, ...]   = (12, 48, 192)
+
+
 def bloque_r(referencia: dict | None = None) -> list[Celda]:
-    """Muestreo por forma de onda, con el resumen robusto congelado.
+    """Muestreo por forma de onda por tamano muestral, con el robusto congelado.
 
     Lo unico que cambia entre las dos configuraciones de cada celda es el
     modelo de ajuste, ``base`` frente a ``stabilized``, de modo que cualquier
     diferencia es atribuible a la regularizacion y no al resumen de las K
     repeticiones.
 
+    Lo unico que cambia entre las dos configuraciones de cada celda es el
+    modelo de ajuste, ``base`` frente a ``stabilized``, de modo que cualquier
+    diferencia es atribuible a la regularizacion y no al resumen de las K
+    repeticiones.
+
+    El tercer eje, el tamano muestral, no estaba en el diseno original y es el
+    que da sentido al bloque. Toda la evidencia previa sobre la regularizacion
+    viene de comparar doce muestras de babuino contra las 480 de GTEx, y la
+    fase 0 mostro ademas que el umbral de R2 no se comporta igual segun cuantas
+    muestras haya. Un bloque R a un unico tamano podria concluir que el
+    estabilizado ayuda y que eso solo fuese cierto con 48 muestras.
+
     Hipotesis contrastable: la regularizacion mejora en los esquemas de huecos
-    y concentrado y con formas apuntadas, y no empeora ni en el equiespaciado
-    ni en la mezcla simetrica.
+    y concentrado, con formas apuntadas y **sobre todo con pocas muestras**, y
+    no empeora ni en el equiespaciado ni en la mezcla simetrica.
 
     Evidencia preliminar a favor, medida sobre los atlas ya calculados: en
     babuino, con doce muestras, el FMM base situa el 53 por ciento de los genes
@@ -356,7 +390,10 @@ def bloque_r(referencia: dict | None = None) -> list[Celda]:
     """
     ref = referencia or REFERENCIA
     definiciones = [
-        (f"samp-{s}__mix-{m}", {**ref, "sampling": s, "waveform_mix": m})
+        (f"n{n}__samp-{s}__mix-{m}",
+         {**ref, "snr": R_SNR, "prop_rhythmic": R_PROP, "n_samples": n,
+          "sampling": s, "waveform_mix": m})
+        for n in R_MUESTRAS
         for s in ("equiespaciado", "aleatorio", "huecos", "concentrado")
         for m in ("simetrica", "gtex", "apuntada", "extrema")
     ]
