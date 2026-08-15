@@ -374,7 +374,12 @@ def comparar_unidad(nombre: str, matriz: Path, tiempos_h: dict[str, float],
                         "fmm_method": fmm_method, "target_size": objetivo,
                         "n_top": len(top.gene_names), "metodo": etiqueta,
                         "segundos": segundos,
-                        "sd_rho_reps": sd_rho_reps(rob, columnas, tiempos_h)}
+                        "sd_rho_reps": sd_rho_reps(rob, columnas, tiempos_h),
+                        # Que repeticion salio elegida y con que puntuacion.
+                        # Es lo que permite ver si dos criterios de seleccion
+                        # se distinguen de verdad o acaban en la misma.
+                        "rep_elegida": rob.selected_rep,
+                        "score_seleccion": rob.selection_score}
                 if con_referencia:
                     fila.update(error_de_picos(atlas, referencia))
 
