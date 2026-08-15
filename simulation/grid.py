@@ -216,22 +216,51 @@ def materializar(celda: Celda, replica: int, **sobrescribir
 # Fase 0: calibracion de la celda de referencia
 # ===========================================================================
 
-def bloque_fase0() -> list[Celda]:
-    """SNR por numero de muestras, para situar la celda de referencia.
+# Ejes de la fase 0. El primer diseno solo cruzaba SNR por numero de muestras,
+# dejando congelados la proporcion de ritmicos y el esquema de muestreo, y
+# **ninguna celda cumplio el criterio**: el desacuerdo entre las K repeticiones
+# no paso de 0,017 en toda la rejilla.
+#
+# La razon, comprobada despues con un experimento dirigido, es que el
+# desacuerdo no lo gobierna el SNR sino cuanta senal hay y como de mal
+# repartida esta. Con 1 por ciento de ritmicos y muestreo con huecos sube a
+# 0,037, mientras que con 5 por ciento se queda en 0,014 hagas lo que hagas con
+# el ruido. Calibrar sin mover esos dos factores era calibrar con los mandos
+# equivocados.
+#
+# La poda de los ejes se apoya en lo ya medido, no en que celda conviene que
+# gane. Se retiran SNR 3, donde las cinco replicas dan rho por encima de 0,97 y
+# desacuerdo de 0,002, y 192 muestras, donde el conjunto TOP colapsa y la
+# etapa robusta no llega a correr con SNR bajo. Se conserva SNR 2 como ancla
+# del regimen saturado, para que el criterio tenga que rechazarlo de forma
+# visible. Se retira el muestreo equiespaciado por regular en exceso.
+FASE0_SNR:      tuple[float, ...] = (0.5, 1.0, 2.0)
+FASE0_MUESTRAS: tuple[int, ...]   = (12, 48)
+FASE0_PROP:     tuple[float, ...] = (0.01, 0.05)
+FASE0_MUESTREO: tuple[str, ...]   = ("aleatorio", "huecos", "concentrado")
 
-    El eje de muestras recorre desde el limite inferior real, los 12 de un
-    tejido de babuino, hasta un tejido mediano de GTEx.
+
+def bloque_fase0() -> list[Celda]:
+    """Rejilla de calibracion, para situar la celda de referencia.
+
+    Cruza los cuatro factores que pueden mover el criterio, incluidos los dos
+    que gobiernan el desacuerdo entre repeticiones. Ver el comentario de los
+    ejes sobre por que el primer diseno no valia.
 
     Se evaluan solo dos configuraciones, la que representa el resumen robusto
     habitual y la que representa la agregacion, porque lo que se busca aqui no
     es comparar metodos sino localizar el regimen. El criterio de eleccion esta
     fijado de antemano: rho en torno a 0,8, MedAE del orden entre una y dos
-    horas, y sd de rho entre las K repeticiones por encima de 0,03.
+    horas, y desacuerdo entre las K repeticiones por encima de 0,03.
     """
     definiciones = [
-        (f"snr{_num(snr)}__n{n}", {**REFERENCIA, "snr": snr, "n_samples": n})
-        for snr in GRID_SNR
-        for n in (12, 48, 192)
+        (f"snr{_num(snr)}__n{n}__prop{_num(p)}__samp-{s}",
+         {**REFERENCIA, "snr": snr, "n_samples": n, "prop_rhythmic": p,
+          "sampling": s})
+        for snr in FASE0_SNR
+        for n in FASE0_MUESTRAS
+        for p in FASE0_PROP
+        for s in FASE0_MUESTREO
     ]
     return _celdas("fase0", definiciones,
                    fmm_methods=("base",),

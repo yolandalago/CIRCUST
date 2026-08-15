@@ -40,11 +40,31 @@ def test_el_muestreo_de_referencia_no_es_degenerado():
 # Estructura de los bloques
 # ===========================================================================
 
-def test_la_fase_cero_cruza_snr_por_numero_de_muestras():
+def test_la_fase_cero_cruza_los_cuatro_factores():
     celdas = bloque_fase0()
-    assert len(celdas) == 15
-    assert {c.generate["snr"] for c in celdas} == set(GRID_SNR)
-    assert {c.generate["n_samples"] for c in celdas} == {12, 48, 192}
+    assert len(celdas) == 36
+    assert {c.generate["snr"] for c in celdas} == {0.5, 1.0, 2.0}
+    assert {c.generate["n_samples"] for c in celdas} == {12, 48}
+
+
+def test_la_fase_cero_mueve_los_factores_que_gobiernan_el_desacuerdo():
+    """Regresion del error de diseno del 14/08/2026.
+
+    La primera fase 0 solo cruzaba SNR por numero de muestras y dejaba
+    congelados la proporcion de ritmicos y el esquema de muestreo, que son
+    justamente los que mueven el desacuerdo entre las K repeticiones. Ninguna
+    celda cumplio el criterio porque la rejilla no contenia los mandos
+    relevantes.
+    """
+    celdas = bloque_fase0()
+    assert len({c.generate["prop_rhythmic"] for c in celdas}) > 1
+    assert len({c.generate["sampling"] for c in celdas}) > 1
+
+
+def test_la_fase_cero_conserva_un_ancla_del_regimen_saturado():
+    # Con SNR 2 el desacuerdo medido baja a 0,002. Se deja en la rejilla para
+    # que el criterio tenga que rechazarlo de forma visible.
+    assert 2.0 in {c.generate["snr"] for c in bloque_fase0()}
 
 
 def test_el_bloque_p_llega_a_la_escala_de_gtex():
@@ -176,10 +196,12 @@ def test_materializar_respeta_los_parametros_de_la_celda():
 
 def test_materializar_es_reproducible_y_distinto_entre_replicas():
     import numpy as np
+    # 2.000 genes al 1 por ciento dan 20 ritmicos, suficientes para los 12
+    # core que el CPCA necesita.
     c = bloque_fase0()[0]
-    a = materializar(c, 0, n_genes=800)
-    b = materializar(c, 0, n_genes=800)
-    d = materializar(c, 1, n_genes=800)
+    a = materializar(c, 0, n_genes=2000)
+    b = materializar(c, 0, n_genes=2000)
+    d = materializar(c, 1, n_genes=2000)
     assert np.array_equal(a.matrix.to_numpy(), b.matrix.to_numpy())
     assert not np.array_equal(a.matrix.to_numpy(), d.matrix.to_numpy())
 
