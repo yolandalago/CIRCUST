@@ -69,7 +69,19 @@ FICHERO_REFERENCIA: str = "referencia.json"
 
 # Parametros de la celda que se trasladan a la referencia. El resto se hereda
 # de la referencia provisional.
-EJES_CALIBRADOS: tuple[str, ...] = ("snr", "n_samples")
+#
+# Tienen que ser TODOS los ejes que la rejilla de calibracion mueve. Si falta
+# alguno, la referencia escrita no es la celda que gano sino una mezcla de ella
+# con los valores provisionales, y el error es silencioso.
+EJES_CALIBRADOS: tuple[str, ...] = (
+    "snr", "n_samples", "prop_rhythmic", "sampling",
+)
+
+# Como convertir cada eje al salir de la tabla de pandas, que devuelve tipos
+# numpy que no serializan a JSON.
+_TIPOS: dict[str, type] = {
+    "snr": float, "n_samples": int, "prop_rhythmic": float, "sampling": str,
+}
 
 
 # ===========================================================================
@@ -109,8 +121,7 @@ def criterio_fase0(d: pd.DataFrame) -> pd.DataFrame:
 
     agrupado = util.groupby("celda")
     t = agrupado.agg(
-        snr=("snr", "first"),
-        n_samples=("n_samples", "first"),
+        **{eje: (eje, "first") for eje in EJES_CALIBRADOS},
         n_ok=("replica", "nunique"),
         rho=("rho", "median"),
         mad_h=("mad_h", "median"),
@@ -151,8 +162,7 @@ def elegir_referencia(d: pd.DataFrame,
         (candidatas["rho"] - RHO_OBJETIVO).abs().to_numpy().argmin()]
     base = dict(referencia_base or REFERENCIA)
     for eje in EJES_CALIBRADOS:
-        valor = ganadora[eje]
-        base[eje] = int(valor) if eje == "n_samples" else float(valor)
+        base[eje] = _TIPOS[eje](ganadora[eje])
     return base
 
 
@@ -209,8 +219,8 @@ def resumen_tau(d: pd.DataFrame) -> pd.DataFrame:
 
 def _informe_fase0(d: pd.DataFrame, raiz: Path, escribir: bool) -> None:
     t = criterio_fase0(d)
-    columnas = ["celda", "snr", "n_samples", "tasa_exito", "rho", "mad_h",
-                "sd_rho_reps", "n_top", "cumple"]
+    columnas = ["celda", "tasa_exito", "rho", "mad_h", "sd_rho_reps", "n_top",
+                "cumple"]
     print("Fase 0, criterio fijado de antemano")
     print(f"  rho en {VENTANA_RHO}, MedAE en {VENTANA_MEDAE_H} h, "
           f"sd de rho > {SD_RHO_MINIMA}, y la celda tiene que correr siempre")

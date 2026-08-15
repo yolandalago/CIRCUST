@@ -11,29 +11,35 @@ import pandas as pd
 import pytest
 
 from simulation.analyze import (
-    CONFIG_CRITERIO, SD_RHO_MINIMA, VENTANA_MEDAE_H, VENTANA_RHO,
-    criterio_fase0, elegir_referencia, escribir_referencia, resumen_tau,
+    CONFIG_CRITERIO, EJES_CALIBRADOS, SD_RHO_MINIMA, VENTANA_MEDAE_H,
+    VENTANA_RHO, criterio_fase0, elegir_referencia, escribir_referencia,
+    resumen_tau,
 )
 from simulation.grid import REFERENCIA
 
 
-def filas(celda, snr, n, *, rho, mad, sd, reps=5, fallos=0, n_top=100):
+def filas(celda, snr, n, *, rho, mad, sd, reps=5, fallos=0, n_top=100,
+          prop=None, muestreo=None):
     """Replicas de una celda con la configuracion del criterio."""
     fmm, metodo = CONFIG_CRITERIO
+    ejes = {"snr": snr, "n_samples": n,
+            "prop_rhythmic": prop if prop is not None
+                             else REFERENCIA["prop_rhythmic"],
+            "sampling": muestreo or REFERENCIA["sampling"]}
     out = []
     for r in range(reps):
         if r < fallos:
-            out.append({"celda": celda, "replica": r, "snr": snr,
-                        "n_samples": n, "fmm_method": "", "metodo": "",
+            out.append({"celda": celda, "replica": r, **ejes,
+                        "fmm_method": "", "metodo": "",
                         "rho": np.nan, "mad_h": np.nan, "sd_rho_reps": np.nan,
                         "n_top": np.nan, "error": "ValueError: colapso"})
             continue
-        out.append({"celda": celda, "replica": r, "snr": snr, "n_samples": n,
+        out.append({"celda": celda, "replica": r, **ejes,
                     "fmm_method": fmm, "metodo": metodo, "rho": rho,
                     "mad_h": mad, "sd_rho_reps": sd, "n_top": n_top,
                     "error": ""})
         # Una segunda configuracion, que el criterio tiene que ignorar.
-        out.append({"celda": celda, "replica": r, "snr": snr, "n_samples": n,
+        out.append({"celda": celda, "replica": r, **ejes,
                     "fmm_method": fmm, "metodo": "aggregate:tsp3",
                     "rho": 0.99, "mad_h": 0.01, "sd_rho_reps": 0.9,
                     "n_top": n_top, "error": ""})
@@ -113,6 +119,37 @@ def test_se_elige_la_celda_que_cumple(fase0):
     ref = elegir_referencia(fase0)
     assert ref["snr"] == 1.0
     assert ref["n_samples"] == 48
+
+
+def test_la_referencia_traslada_todos_los_ejes_que_la_rejilla_mueve():
+    """Regresion. Si EJES_CALIBRADOS no cubre todo lo que la fase 0 varia, la
+    referencia escrita no es la celda ganadora sino una mezcla de ella con los
+    valores provisionales, y el error no da ninguna senal."""
+    from simulation.grid import bloque_fase0
+    variados = {clave
+                for clave in ("snr", "n_samples", "prop_rhythmic", "sampling")
+                if len({c.generate[clave] for c in bloque_fase0()}) > 1}
+    assert variados <= set(EJES_CALIBRADOS)
+
+
+def test_la_referencia_recoge_la_proporcion_de_ritmicos_de_la_ganadora():
+    d = pd.DataFrame(
+        filas("gana", 1.0, 48, rho=0.75, mad=1.5, sd=0.05,
+              prop=0.01, muestreo="huecos")
+        + filas("pierde", 2.0, 48, rho=0.99, mad=0.3, sd=0.001,
+                prop=0.05, muestreo="aleatorio"))
+    ref = elegir_referencia(d)
+    assert ref["prop_rhythmic"] == 0.01
+    assert ref["sampling"] == "huecos"
+
+
+def test_la_referencia_es_serializable_a_json(tmp_path):
+    d = pd.DataFrame(filas("a", 1.0, 48, rho=0.8, mad=1.5, sd=0.05, prop=0.01))
+    leida = json.loads(escribir_referencia(elegir_referencia(d),
+                                           tmp_path).read_text())
+    assert isinstance(leida["n_samples"], int)
+    assert isinstance(leida["snr"], float)
+    assert isinstance(leida["sampling"], str)
 
 
 def test_la_referencia_conserva_los_demas_parametros(fase0):
