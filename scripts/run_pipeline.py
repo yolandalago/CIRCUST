@@ -105,11 +105,11 @@ DEFAULT_CONFIG = {
     # Preprocesamiento
     "sparse_threshold":       0.3,      # fraccion max de ceros/NaN por gen
     # CPCA
-    "n_outlier_candidates":   8,        # muestras cercanas al origen a examinar
     "tight_radius":           0.10,     # umbral radial primario
     "loose_radius":           0.15,     # umbral radial alternativo
     # Deteccion de outliers
-    "outlier_fmm_threshold":   3.0,     # |residuo estand.| FMM
+    "spline_gene_threshold":   3.5,     # umbral residuo estandarizado del spline, por gen
+    "spline_outlier_fraction": 0.25,    # fraccion de genes core que deben coincidir
     "max_outlier_fraction":    0.05,    # limite max de muestras eliminables
     # Ajuste FMM
     "fmm_alpha_grid":         48,       # resolucion de la rejilla alpha
@@ -437,10 +437,10 @@ def main() -> None:
     _t = time.perf_counter()
     cpca_result = CPCA(
         core_genes            = core_genes,
-        n_outlier_candidates  = cfg["n_outlier_candidates"],
         tight_radius          = cfg["tight_radius"],
         loose_radius          = cfg["loose_radius"],
-        fmm_threshold         = cfg["outlier_fmm_threshold"],
+        spline_gene_threshold   = cfg["spline_gene_threshold"],
+        spline_outlier_fraction = cfg["spline_outlier_fraction"],
         max_outlier_fraction  = cfg["max_outlier_fraction"],
         fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
@@ -460,7 +460,7 @@ def main() -> None:
         anchor_gene    = cfg["anchor_gene"],
         direction_gene = cfg["direction_gene"],
         verbose        = True,
-    ).run(cpca_result, core_genes_found)
+    ).run(cpca_result)
     timing["preliminary_order"] = time.perf_counter() - _t
 
     # ─────────────────────────────────────────────────────────────────────
