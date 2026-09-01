@@ -812,9 +812,12 @@ class FMMModel(RhythmModel):
         # ── Valores ajustados finales y estadisticos ───────────────────
         fitted        = _fmm_predict(time_points, M, A, alpha, beta, omega)
         residuals     = data - fitted
-        # ddof=1: s_g^2 = 1/(n-1) sum (e - e_bar)^2, la definicion del anexo
-        # "Deteccion de muestras atipicas" sobre la que opera el umbral |r| > 3.
-        residuals_std = self._standardise_residuals(residuals, ddof=1)
+        # ddof=5: parametros libres del modelo (M, A, alpha, beta, omega).
+        # El anexo "Deteccion de muestras atipicas" usa ddof=1 (via sd() de R),
+        # pero esa formula solo es insesgada cuando el unico parametro estimado
+        # es la media; aqui se estimaron 5, asi que el denominador correcto de
+        # la varianza residual es n-5, no n-1.
+        residuals_std = self._standardise_residuals(residuals, ddof=5)
         r2            = self._r2(data, fitted)
         sse           = float(np.sum(residuals**2))
 

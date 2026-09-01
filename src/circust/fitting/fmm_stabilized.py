@@ -1024,9 +1024,11 @@ def fit_gene(
     # 5. Construir FitResult (mismo formato que FMMModel)
     fitted = fit["fitted"]
     residuals = data - fitted
-    # Residuos estandarizados con ddof=1, es decir s_g^2 = 1/(n-1) sum (e - e_bar)^2,
-    # tal y como se define en el anexo "Deteccion de muestras atipicas".
-    res_std = residuals.std(ddof=1)
+    # ddof=5: parametros libres del modelo (M, A, alpha, beta, omega), igual
+    # que en FMMModel. El anexo "Deteccion de muestras atipicas" usa ddof=1,
+    # pero eso solo es insesgado si el unico parametro estimado es la media;
+    # aqui se estimaron 5, asi que el denominador correcto es n-5.
+    res_std = residuals.std(ddof=5)
     residuals_std = (residuals - residuals.mean()) / res_std if res_std > 0 \
                     else np.zeros_like(residuals)
     sse = float(np.sum(residuals ** 2))
