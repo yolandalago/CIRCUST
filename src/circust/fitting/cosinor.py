@@ -111,7 +111,10 @@ class CosinorModel(RhythmModel):
 
         # ── Residuos y R-cuadrado ──────────────────────────────────────
         residuals     = data - fitted
-        residuals_std = self._standardise_residuals(residuals, ddof=1)
+        # ddof=3: parametros libres del modelo (M, A, phi). El estimador
+        # insesgado de la varianza residual divide por n-p, no por n-1
+        # (que solo es correcto si el unico parametro estimado es la media).
+        residuals_std = self._standardise_residuals(residuals, ddof=3)
         r2            = self._r2(data, fitted)
         sse           = float(np.sum(residuals**2))
 
