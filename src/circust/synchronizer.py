@@ -9,37 +9,25 @@ El ordenamiento circular derivado de CPCA es invariante a rotacion y tiene
 una direccion arbitraria (sentido horario o antihorario). Esta etapa corrige
 ambos problemas estableciendo un marco de referencia biologico.
 
-Modalidades
------------
-``mode="manual"`` (implementada)
-    Sincronizacion manual basada en genes ancla conocidos:
+Sincronizacion manual basada en genes ancla conocidos
+------------------------------------------------------
+* Un gen de referencia (``anchor_gene``, por defecto ARNTL) se coloca en
+  π en la escala circular — su pico define el punto de arranque.
+* Un gen de direccion (``direction_gene``, por defecto DBP) determina la
+  orientacion (CW vs CCW): si su pico cae en la mitad incorrecta se invierte.
+* Un gen de consistencia (``consistency_gene``, por defecto CRY1) participa
+  en una verificacion de consistencia biologica refinada (Paso 2.2).
 
-    * Un gen de referencia (``anchor_gene``, por defecto ARNTL) se coloca en
-      π en la escala circular — su pico define el punto de arranque.
-    * Un gen de direccion (``direction_gene``, por defecto DBP) determina la
-      orientacion (CW vs CCW): si su pico cae en la mitad incorrecta se invierte.
-    * Un gen de consistencia (``consistency_gene``, por defecto CRY1) participa
-      en una verificacion de consistencia biologica refinada (Paso 2.2).
+Paso 2.1 — Rotacion y determinacion de direccion:
+    1. Rotar escala circular: peak(anchor) → π.
+    2. Si (direction_peak − anchor_peak + π) mod 2π ≥ π → invertir.
+    3. Reparametrizar ajustes FMM de genes core en el nuevo marco.
+    4. Clasificar genes core como *dia* (pico ∈ [0, π)) o *noche* (pico ∈ [π, 2π)).
 
-    Paso 2.1 — Rotacion y determinacion de direccion:
-        1. Rotar escala circular: peak(anchor) → π.
-        2. Si (direction_peak − anchor_peak + π) mod 2π ≥ π → invertir.
-        3. Reparametrizar ajustes FMM de genes core en el nuevo marco.
-        4. Clasificar genes core como *dia* (pico ∈ [0, π)) o *noche* (pico ∈ [π, 2π)).
-
-    Paso 2.2 — Verificacion de consistencia biologica:
-        Si direction_gene esta demasiado cerca de 0 o π, o menos de la mitad
-        de los genes sin anchor/direction tienen pico en [0, π), y el orden
-        direction < consistency < anchor NO se cumple, entonces invertir.
-
-``mode="hybrid"`` (reservado para implementacion futura)
-    Sincronizacion hibrida in vivo / post mortem inspirada en el molecular
-    timetable (Ueda et al., 2004; Higashi et al., 2016). Formula la alineacion
-    como un problema de minimizacion en el circulo: busca la rotacion y
-    orientacion que maximizan la concordancia entre los tiempos de pico
-    estimados en el tejido objetivo (post mortem) y los tiempos de referencia
-    procedentes de tejido in vivo con etiqueta temporal.
-    Ver :meth:`CircularSynchronizer._hybrid_sync` para la API prevista.
+Paso 2.2 — Verificacion de consistencia biologica:
+    Si direction_gene esta demasiado cerca de 0 o π, o menos de la mitad
+    de los genes sin anchor/direction tienen pico en [0, π), y el orden
+    direction < consistency < anchor NO se cumple, entonces invertir.
 
 Posicion en el pipeline
 -----------------------
@@ -175,19 +163,6 @@ class CircularSynchronizer:
 
     Parameters
     ----------
-    mode : str
-        Modalidad de sincronizacion. Opciones:
-
-        ``"manual"`` (defecto)
-            Sincronizacion basada en genes ancla con fases biologicamente
-            conocidas. Requiere ``anchor_gene`` y ``direction_gene`` presentes
-            en los genes core.
-
-        ``"hybrid"`` (futuro)
-            Sincronizacion hibrida in vivo/post mortem. Requiere
-            ``reference_peaks`` en la llamada a :meth:`run`. No implementada:
-            lanza ``NotImplementedError``.
-
     anchor_gene : str
         Gen cuyo pico se coloca en π para definir el punto de arranque del
         ordenamiento. En el reloj mamifero, ARNTL tiene su pico cerca de la
@@ -210,23 +185,17 @@ class CircularSynchronizer:
     Example
     -------
     >>> syncer = CircularSynchronizer()
-    >>> result = syncer.run(refined, core_genes)
+    >>> result = syncer.run(refined)
     >>> print(result.summary())
     """
 
     def __init__(
         self,
-        mode:             str  = "manual",
         anchor_gene:      str  = "ARNTL",
         direction_gene:   str  = "DBP",
         consistency_gene: str  = "CRY1",
         verbose:          bool = True,
     ) -> None:
-        if mode not in ("manual", "hybrid"):
-            raise ValueError(
-                f"mode debe ser 'manual' o 'hybrid', se recibio {mode!r}"
-            )
-        self.mode             = mode
         self.anchor_gene      = anchor_gene
         self.direction_gene   = direction_gene
         self.consistency_gene = consistency_gene
@@ -238,9 +207,7 @@ class CircularSynchronizer:
 
     def run(
         self,
-        refined:         CPCAResult,
-        core_genes:      list[str],
-        reference_peaks: dict[str, float] | None = None,
+        refined: CPCAResult,
     ) -> SynchronizationResult:
         """
         Ejecuta la sincronizacion circular.
@@ -248,37 +215,15 @@ class CircularSynchronizer:
         Parameters
         ----------
         refined : CPCAResult
-            Salida de ``CPCA.run()``.
-
-        core_genes : list de str
-            Lista ordenada de simbolos de genes reloj centrales.
-
-        reference_peaks : dict {gen: float} en radianes, opcional
-            Solo necesario para ``mode="hybrid"``. Tiempos de pico de
-            referencia in vivo por gen (en [0, 2π)). Ignorado en modo manual.
+            Salida de ``CPCA.run()``. Los genes core se toman de
+            ``refined.core_genes_found``.
 
         Returns
         -------
         SynchronizationResult
         """
         self._log("=== Etapa 2: Sincronizacion Circular ===")
-        self._log(f"  Modo: {self.mode}")
-
-        if self.mode == "manual":
-            return self._manual_sync(refined, core_genes)
-        else:
-            return self._hybrid_sync(refined, core_genes, reference_peaks)
-
-    # ------------------------------------------------------------------
-    # Modalidad manual (implementada)
-    # ------------------------------------------------------------------
-
-    def _manual_sync(
-        self,
-        refined:    CPCAResult,
-        core_genes: list[str],
-    ) -> SynchronizationResult:
-        """Sincronizacion manual en dos pasos usando genes ancla."""
+        core_genes = list(refined.core_genes_found)
 
         # ── Paso 2.1: rotacion + determinacion de direccion ───────────────
         self._log("  Paso 2.1 — rotando al marco de referencia ...")
@@ -320,50 +265,7 @@ class CircularSynchronizer:
         return result
 
     # ------------------------------------------------------------------
-    # Modalidad hibrida (punto de extension — no implementada)
-    # ------------------------------------------------------------------
-
-    def _hybrid_sync(
-        self,
-        refined:         CPCAResult,
-        core_genes:      list[str],
-        reference_peaks: dict[str, float] | None,
-    ) -> SynchronizationResult:
-        """
-        Sincronizacion hibrida in vivo / post mortem.
-
-        Aproximacion prevista
-        ---------------------
-        Formulada como un problema de minimizacion en el circulo: busca la
-        rotacion θ ∈ [0, 2π) y la orientacion s ∈ {+1, −1} que minimizan la
-        distancia circular total entre los tiempos de pico estimados en el
-        tejido post mortem y los tiempos de referencia in vivo:
-
-            argmin_{θ, s}  Σ_g  d_circ(s · peak_g + θ,  ref_g)
-
-        donde d_circ es la distancia angular minima en [0, π].
-
-        Inspirado en: Ueda et al. (2004) PNAS, Higashi et al. (2016).
-
-        Parameters
-        ----------
-        reference_peaks : dict {gen: float}
-            Tiempos de pico de referencia in vivo en radianes [0, 2π).
-            Debe contener al menos los genes core presentes en ``core_genes``.
-
-        Para implementar
-        ----------------
-        Sobreescribir este metodo en una subclase, o implementarlo aqui
-        cuando los datos de referencia esten disponibles.
-        """
-        raise NotImplementedError(
-            "Sincronizacion hibrida in vivo/post mortem no implementada.\n"
-            "Usa mode='manual' o subclasifica CircularSynchronizer y "
-            "sobreescribe _hybrid_sync()."
-        )
-
-    # ------------------------------------------------------------------
-    # Pasos internos de la modalidad manual
+    # Pasos internos
     # ------------------------------------------------------------------
 
     def _pre_order(
@@ -372,8 +274,6 @@ class CircularSynchronizer:
         core_genes: list[str],
     ) -> tuple:
         """
-        Paso 2.1 — Equivalente en R: ``basicPreOder_cores`` (lineas 4192-4263).
-
         Returns
         -------
         o_new       : np.ndarray  — indices de ordenamiento de muestras
