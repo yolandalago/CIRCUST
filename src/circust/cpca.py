@@ -17,16 +17,24 @@ Y su norma(LEi):
 da un *ordenamiento circular* que refleja el ritmo circadiano subyacente.
 Muestras cercanas al origen tienen norma pequena y son potenciales outliers.
 
-Deteccion de outliers (Seccion 3.3 del paper suplementario de CIRCUST)
------------------------------------------------------------------
-Dos criterios en logica OR una muestra se elimina si viola cualquiera:
+Deteccion de outliers
+----------------------
+Procedimiento estandar (spline + porcentaje de genes): por cada gen core
+se ajusta un spline cubico periodico de nodos fijos (ver
+fitting/cyclic_spline.py), independiente del modelo FMM usado despues en
+el pipeline. Un gen es "candidata" si su residuo estandarizado supera
+spline_gene_threshold; la muestra se declara atipica si es candidata en
+al menos spline_outlier_fraction de los genes core (no basta con un solo
+gen, evita que una desviacion propia de un gen tire la muestra entera).
+Valido a partir de n>=24 aprox. (ver memoria de proyecto
+"fmm-sobreajuste-oculta-outliers-n-bajo").
 
-    1. Radial CPCA:  LEi < tight_radius (0.10)
-       Muestras con distancia al origen en espacio PC1-PC2 muy pequena
-       disrumpen la estructura circular y reflejan desalineaciones individuales.
-
-    2. Residuos FMM: \|ri\| > fmm_threshold (3.0)  para cualquier gen core
-       Detecta errores de medicion u otras anomalias comunes entre genes.
+Criterio radial CPCA (opcional, DESACTIVADO por defecto): LEi < tight_radius
+(0.10). Su umbral fijo no escala bien con n (no es data-driven todavia,
+ver memoria de proyecto), asi que no participa en la decision salvo que
+se active explicitamente (use_radial_criterion=True). Queda preparado
+para combinarse con el spline via AND/OR mas adelante, tal como se
+plantea en la correspondencia con la tutora.
 
 Si se detectan outliers, se eliminan, se renormaliza la matriz core y se
 re-ejecuta CPCA para obtener el ordenamiento final limpio.
@@ -47,6 +55,7 @@ from circust.core_genes import SEED_GENES_DEFAULT
 from circust.fitting.fmm            import FMMModel
 from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
 from circust.fitting.cosinor import CosinorModel
+from circust.fitting.cyclic_spline import fit_cyclic_spline_residuals
 from circust.fitting.rhythm_model import FitResult
 from circust.preprocessing import normalise_matrix
 
@@ -91,9 +100,9 @@ class CPCAResult:
     samples_dropped : list[int]
         Indices originales de columna de las muestras eliminadas.
 
-    fmm_outliers : list[int]
-        Subconjunto de samples_dropped detectados exclusivamente por
-        el criterio de residuos FMM (\|ri\| > fmm_threshold).
+    spline_outliers : list[int]
+        Subconjunto de samples_dropped detectados exclusivamente por el
+        criterio de residuos del spline periodico + porcentaje de genes.
 
     Campos de diagnostico (para visualizacion)
     ------------------------------------------
@@ -102,6 +111,12 @@ class CPCAResult:
 
     std_residuals_fmm : pd.DataFrame o None
         Residuos FMM estandarizados (genes+PCs x muestras, orden inicial).
+        Solo para diagnostico/visualizacion, YA NO se usa para detectar
+        outliers (eso lo hace std_residuals_spline).
+
+    std_residuals_spline : pd.DataFrame o None
+        Residuos estandarizados del spline periodico por gen core (orden
+        inicial). Es lo que realmente usa la deteccion de outliers.
 
     fmm_fits_initial : dict[str, FitResult]
         Ajustes FMM sobre genes core + PC1/PC2/PC3 en orden CPCA inicial.
@@ -120,13 +135,14 @@ class CPCAResult:
     fmm_fits_final:        dict
     fmm_peak_times_final:  dict
     samples_dropped:       list[int]   = field(default_factory=list)
-    fmm_outliers:          list[int]   = field(default_factory=list)
+    spline_outliers:       list[int]   = field(default_factory=list)
 
     # ── Diagnostico ───────────────────────────────────────────────────────
     pc1:                   np.ndarray                = field(default_factory=lambda: np.array([]))
     pc2:                   np.ndarray                = field(default_factory=lambda: np.array([]))
     pc3:                   np.ndarray                = field(default_factory=lambda: np.array([]))
     std_residuals_fmm:     Optional[pd.DataFrame]    = None
+    std_residuals_spline:  Optional[pd.DataFrame]    = None
     fmm_fits_initial:      dict                      = field(default_factory=dict)
     cosinor_fits_initial:  dict                      = field(default_factory=dict)
     pc1_initial:           np.ndarray                = field(default_factory=lambda: np.array([]))
@@ -136,7 +152,7 @@ class CPCAResult:
     lambda_star:           Optional[float]           = None
 
     def summary(self) -> str:
-        n_cpca = len(self.samples_dropped) - len(self.fmm_outliers)
+        n_cpca = len(self.samples_dropped) - len(self.spline_outliers)
         lines = [
             "=== Resumen CPCA + Deteccion de Outliers ===",
             f"  Genes core usados           : {len(self.core_genes_found)}  {self.core_genes_found}",
@@ -146,7 +162,7 @@ class CPCAResult:
             f"{self.variance_explained[2]:.1%}",
             f"  Muestras eliminadas         : {len(self.samples_dropped)}",
             f"    Criterio CPCA radial      : {n_cpca}",
-            f"    Criterio FMM residuos     : {len(self.fmm_outliers)}",
+            f"    Criterio spline residuos  : {len(self.spline_outliers)}",
             f"  Muestras finales            : {self.expr_norm_final.shape[1]}",
         ]
         return "\n".join(lines)
@@ -166,10 +182,6 @@ class CPCA:
     core_genes : list[str], opcional
         Genes ancla circadianos. Por defecto los 12 del articulo CIRCUST.
 
-    n_outlier_candidates : int
-        Muestras a examinar como candidatas a outlier (menor norma PC1-PC2).
-        Por defecto: 8.
-
     tight_radius : float
         Umbral radial primario. Muestras con LEi <= tight_radius se confirman
         como outliers CPCA. Por defecto: 0.10.
@@ -178,11 +190,26 @@ class CPCA:
         Umbral de respaldo cuando ninguna muestra califica con tight_radius.
         Por defecto: 0.15.
 
-    Parametros — deteccion de outliers FMM
-    ---------------------------------------
-    fmm_threshold : float
-        Umbral de residuo FMM estandarizado. Muestras con \|ri\| > fmm_threshold
-        en cualquier gen core se declaran outliers. Por defecto: 3.0.
+    use_radial_criterion : bool
+        Si True, el criterio radial participa en la deteccion de outliers
+        (union OR con el spline). Por defecto: False (desactivado): el
+        umbral fijo tight_radius/loose_radius no escala bien con n y aun
+        no tiene sustituto data-driven validado (ver memoria de proyecto).
+        El procedimiento estandar del TFG usa solo el criterio de spline.
+
+    Parametros — deteccion de outliers (spline)
+    ---------------------------------------------
+    spline_n_knots : int
+        Numero de nodos del spline periodico por gen core. Por defecto: 5.
+
+    spline_gene_threshold : float
+        Umbral de residuo estandarizado del spline para que un gen
+        declare a una muestra "candidata". Por defecto: 3.5.
+
+    spline_outlier_fraction : float
+        Fraccion minima de genes core que deben declarar "candidata" a
+        una muestra para que se elimine definitivamente. Por defecto:
+        0.25 (25% de los genes).
 
     max_outlier_fraction : float
         Limite maximo de muestras eliminables: ceil(fraccion x n_muestras).
@@ -229,11 +256,13 @@ class CPCA:
         self,
         core_genes:               list[str] = None,
         # CPCA
-        n_outlier_candidates:     int       = 8,
         tight_radius:             float     = 0.10,
         loose_radius:             float     = 0.15,
+        use_radial_criterion:     bool      = False,
         # Outlier detection
-        fmm_threshold:          float     = 3.0,
+        spline_n_knots:           int       = 5,
+        spline_gene_threshold:    float     = 3.5,
+        spline_outlier_fraction:  float     = 0.25,
         max_outlier_fraction:     float     = 0.05,
         # FMM fitting
         fmm_length_alpha_grid:    int       = 48,
@@ -253,10 +282,18 @@ class CPCA:
         # FMM) y no elimina outliers (max_outlier_fraction=0). Lo usa
         # RobustOrder por replica para evitar ~el 77% del coste, que se tiraba.
         self.compute_fmm_fits         = compute_fmm_fits
-        self.n_outlier_candidates     = n_outlier_candidates
         self.tight_radius             = tight_radius
         self.loose_radius             = loose_radius
-        self.fmm_threshold          = fmm_threshold
+        # El criterio radial (LEi) esta desactivado por defecto: su umbral
+        # fijo (tight_radius/loose_radius) no escala bien con n (ver memoria
+        # de proyecto), y esta pendiente de un umbral data-driven que aun no
+        # se ha validado. Se calcula igualmente (barato) para dejarlo listo
+        # para combinarse AND/OR con el spline mas adelante, pero no
+        # participa en la decision final salvo que se active explicitamente.
+        self.use_radial_criterion     = use_radial_criterion
+        self.spline_n_knots           = spline_n_knots
+        self.spline_gene_threshold    = spline_gene_threshold
+        self.spline_outlier_fraction  = spline_outlier_fraction
         self.max_outlier_fraction     = max_outlier_fraction
         self.fmm_length_alpha_grid    = fmm_length_alpha_grid
         self.fmm_length_omega_grid    = fmm_length_omega_grid
@@ -338,7 +375,7 @@ class CPCA:
         # se eliminan outliers; sample_order/circular_scale no dependen del FMM.
         if not self.compute_fmm_fits:
             fmm_fits_ini, cos_fits_ini, std_res_df = {}, {}, None
-            cpca_outs, fmm_outs, all_dropped = [], [], []
+            cpca_outs, spline_outs, all_dropped = [], [], []
             pc1_initial, pc2_initial = pc1.copy(), pc2.copy()
             core_norm_clean = core_matrix
             expr_norm_final = self._order_full_matrix(expr_norm, all_dropped, sample_order)
@@ -353,11 +390,12 @@ class CPCA:
                 fmm_fits_final       = fmm_fits_fin,
                 fmm_peak_times_final = fmm_peaks_fin,
                 samples_dropped      = list(all_dropped),
-                fmm_outliers         = fmm_outs,
+                spline_outliers      = spline_outs,
                 pc1                  = pc1,
                 pc2                  = pc2,
                 pc3                  = pc3,
                 std_residuals_fmm    = std_res_df,
+                std_residuals_spline = None,
                 fmm_fits_initial     = fmm_fits_ini,
                 cosinor_fits_initial = cos_fits_ini,
                 pc1_initial          = pc1_initial,
@@ -367,18 +405,23 @@ class CPCA:
             return result
 
         self._log("=== Etapa 1.2: Deteccion de Outliers ===")
-        self._log("  Ajustando FMM y Cosinor en genes core (orden inicial) ...")
+        self._log("  Ajustando FMM y Cosinor en genes core (orden inicial, diagnostico) ...")
         fmm_fits_ini, cos_fits_ini, std_res_df = self._fit_initial(
             core_matrix, genes_found, sample_order, circular_scale,
             pc1, pc2, pc3,
         )
 
-        # ── Paso 4: detectar outliers (CPCA OR FMM residuos) ─────────────
-        cpca_outs, fmm_outs, all_dropped = self._detect_outliers(
-            outlier_idx, sample_order, std_res_df, genes_found,
+        self._log("  Ajustando spline periodico en genes core (deteccion, independiente de FMM) ...")
+        std_res_spline_df = self._fit_spline_initial(
+            core_matrix, genes_found, sample_order, circular_scale,
+        )
+
+        # ── Paso 4: detectar outliers (CPCA radial OR spline residuos) ────
+        cpca_outs, spline_outs, all_dropped = self._detect_outliers(
+            outlier_idx, sample_order, std_res_spline_df, genes_found,
         )
         self._log(f"  Criterio CPCA radial     : {len(cpca_outs)} muestra(s)")
-        self._log(f"  Criterio FMM residuos    : {len(fmm_outs)} muestra(s)")
+        self._log(f"  Criterio spline residuos : {len(spline_outs)} muestra(s)")
         self._log(f"  Total eliminados         : {len(all_dropped)}")
 
         # Guardar proyecciones iniciales (antes de posible re-ejecucion)
@@ -417,12 +460,13 @@ class CPCA:
             fmm_fits_final       = fmm_fits_fin,
             fmm_peak_times_final = fmm_peaks_fin,
             samples_dropped      = list(all_dropped),
-            fmm_outliers         = fmm_outs,
+            spline_outliers      = spline_outs,
             # diagnostico
             pc1                  = pc1,
             pc2                  = pc2,
             pc3                  = pc3,
             std_residuals_fmm    = std_res_df,
+            std_residuals_spline = std_res_spline_df,
             fmm_fits_initial     = fmm_fits_ini,
             cosinor_fits_initial = cos_fits_ini,
             pc1_initial          = pc1_initial,
@@ -475,8 +519,10 @@ class CPCA:
         n_genes, n_samples = values.shape
 
         # Centrar por filas, escalar por columnas (R: prcomp scale.=TRUE center=FALSE)
-        centred  = values - values.mean(axis=1, keepdims=True)
-        col_rms  = np.sqrt(np.sum(centred**2, axis=0) / (n_genes - 1))
+        centred = values - np.nanmean(values, axis=1, keepdims=True)
+        col_rms = np.sqrt(
+            np.nansum(centred**2,axis=0) / (n_genes - 1)
+        )
         col_rms[col_rms == 0] = 1.0
         scaled   = centred / col_rms
 
@@ -497,16 +543,14 @@ class CPCA:
         sample_order   = np.argsort(phi)
         circular_scale = phi[sample_order]
 
-        # Outliers radiales: n_outlier_candidates menores normas
-        n_cands      = min(self.n_outlier_candidates, n_samples)
-        cand_idx     = np.argsort(norm12)[:n_cands]
-        tight_mask   = norm12[cand_idx] <= self.tight_radius
+        # Outliers radiales: LEi <= tight_radius sobre TODAS las muestras
+        tight_mask = norm12 <= self.tight_radius
 
         if tight_mask.any():
-            outlier_idx = cand_idx[tight_mask]
+            outlier_idx = np.where(tight_mask)[0]
         else:
-            loose_mask  = norm12[cand_idx] <= self.loose_radius
-            outlier_idx = cand_idx[loose_mask]
+            loose_mask  = norm12 <= self.loose_radius
+            outlier_idx = np.where(loose_mask)[0]
 
         return sample_order, circular_scale, pc1, pc2, pc3, var_exp, outlier_idx
 
@@ -566,52 +610,106 @@ class CPCA:
         )
         return fmm_fits, cos_fits, std_res_df
 
-    def _detect_outliers(
+    def _fit_spline_initial(
         self,
-        outlier_idx:   np.ndarray,
-        sample_order:  np.ndarray,
-        std_res_df:    pd.DataFrame,
-        genes_found:   list[str],
-    ) -> tuple[list[int], list[int], list[int]]:
-        r"""
-        Aplica criterios de outlier en logica OR (Sec. 3.3 suplementario):
-
-          1. CPCA radial (LEi < tight_radius): ya en outlier_idx.
-          2. FMM residuos (\|ri\| > fmm_threshold): para cualquier gen core.
+        core_matrix:    pd.DataFrame,
+        genes_found:    list[str],
+        sample_order:   np.ndarray,
+        circular_scale: np.ndarray,
+    ) -> pd.DataFrame:
+        """
+        Ajusta el spline periodico (independiente de FMM) en cada gen
+        core usando el ordenamiento CPCA inicial. Solo genes core, no
+        eigengenes (a diferencia de _fit_initial): esto alimenta
+        exclusivamente la deteccion de outliers.
 
         Returns
         -------
-        cpca_outs  : eliminados por criterio radial
-        fmm_outs   : eliminados solo por criterio FMM
-        all_dropped: union ordenada (con tope max_outlier_fraction)
+        std_res_df : DataFrame (genes x muestras) de residuos
+        estandarizados del spline.
+        """
+        cm_vals = core_matrix.values
+        std_res_rows: list[np.ndarray] = []
+
+        for i, gene in enumerate(genes_found):
+            data = cm_vals[i, sample_order]
+            std_res_rows.append(
+                fit_cyclic_spline_residuals(data, circular_scale, n_knots=self.spline_n_knots)
+            )
+
+        return pd.DataFrame(
+            np.vstack(std_res_rows),
+            index   = genes_found,
+            columns = np.arange(len(circular_scale)),
+        )
+
+    def _detect_outliers(
+        self,
+        outlier_idx:        np.ndarray,
+        sample_order:       np.ndarray,
+        std_res_spline_df:  pd.DataFrame,
+        genes_found:        list[str],
+    ) -> tuple[list[int], list[int], list[int]]:
+        r"""
+        Aplica criterios de outlier en logica OR:
+
+          1. CPCA radial (LEi < tight_radius): ya en outlier_idx. DESACTIVADO
+             por defecto (use_radial_criterion=False); su umbral fijo no
+             escala bien con n y aun no tiene sustituto data-driven
+             validado. Se deja preparado para activarse/combinarse mas
+             adelante sin cambiar la firma de este metodo.
+          2. Spline periodico + porcentaje de genes (procedimiento estandar
+             del TFG): un gen es "candidata" si su residuo estandarizado
+             supera spline_gene_threshold; la muestra se declara atipica si
+             es candidata en >= spline_outlier_fraction de los genes core.
+
+        Returns
+        -------
+        cpca_outs   : eliminados por criterio radial (vacio si esta desactivado)
+        spline_outs : eliminados solo por criterio spline
+        all_dropped : union ordenada (con tope max_outlier_fraction)
         """
         n_samples = len(sample_order)
         cap       = int(np.ceil(self.max_outlier_fraction * n_samples))
 
-        # Criterio 1: CPCA radial
-        cpca_set = set(outlier_idx.tolist())
+        # Criterio 1: CPCA radial (opcional, desactivado por defecto)
+        active_outlier_idx = outlier_idx if self.use_radial_criterion else np.array([], dtype=int)
+        cpca_set = set(active_outlier_idx.tolist())
 
-        # Criterio 2: residuos FMM sobre genes core (no eigengenes)
-        core_res = std_res_df.loc[genes_found].values  # (n_genes, n_samples)
-        fmm_cands: list[int] = []
-        for i in range(len(genes_found)):
-            for pos in np.where(np.abs(core_res[i]) > self.fmm_threshold)[0]:
-                fmm_cands.append(int(sample_order[pos]))
+        # Criterio 2: spline periodico + porcentaje de genes. Valido a
+        # partir de n>=24 aprox (ver memoria "fmm-sobreajuste-oculta-outliers-n-bajo",
+        # el mismo problema de sobreajuste con pocos puntos afecta tambien
+        # al spline, aunque con margen algo mayor que FMM).
+        if n_samples < 24:
+            self._log(
+                f"  AVISO: n={n_samples} < 24, el criterio de residuos del "
+                f"spline puede no ser fiable (ver limitacion conocida en "
+                f"la memoria del TFG)."
+            )
+
+        core_res      = std_res_spline_df.loc[genes_found].values  # (n_genes, n_samples)
+        per_gene_flag = np.abs(core_res) > self.spline_gene_threshold
+        frac_flagged  = per_gene_flag.mean(axis=0)
+
+        spline_cands: list[int] = [
+            int(sample_order[pos])
+            for pos in np.where(frac_flagged >= self.spline_outlier_fraction)[0]
+        ]
 
         # Union OR con tope (chequea ANTES de agregar para que cap=0 elimine 0)
         seen:       set[int]  = set()
         all_dropped: list[int] = []
-        for idx in list(outlier_idx) + fmm_cands:
+        for idx in list(active_outlier_idx) + spline_cands:
             if len(all_dropped) >= cap:
                 break
             if idx not in seen:
                 seen.add(idx)
                 all_dropped.append(idx)
 
-        cpca_outs = [i for i in all_dropped if i in cpca_set]
-        fmm_outs  = [i for i in all_dropped if i not in cpca_set]
+        cpca_outs   = [i for i in all_dropped if i in cpca_set]
+        spline_outs = [i for i in all_dropped if i not in cpca_set]
 
-        return cpca_outs, fmm_outs, all_dropped
+        return cpca_outs, spline_outs, all_dropped
 
     def _drop_samples(
         self, matrix: pd.DataFrame, dropped: list[int],
