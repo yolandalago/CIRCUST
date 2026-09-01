@@ -146,7 +146,15 @@ class RhythmModel(ABC):
 
     @staticmethod
     def _standardise_residuals(residuals: np.ndarray, ddof: int = 1) -> np.ndarray:
-        """(res - media) / desv_std  con ``ddof`` grados de libertad."""
+        """
+        (res - media) / desv_std  con ``ddof`` grados de libertad.
+
+        ``ddof`` debe ser el numero de parametros libres del modelo que
+        genero ``residuals`` (p.ej. 3 para Cosinor, 5 para FMM), no un valor
+        fijo de 1: SSE/(n-1) solo es insesgado para la varianza residual
+        cuando el unico parametro estimado es la media; si el modelo estimo
+        p parametros, el estimador insesgado es SSE/(n-p).
+        """
         std = residuals.std(ddof=ddof)
         if std == 0:
             return np.zeros_like(residuals)
