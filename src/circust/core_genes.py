@@ -332,25 +332,3 @@ class CoreGeneSelector:
                 f"--core-genes: se necesitan al menos 2 genes, se recibio: {genes}"
             )
         return cls(custom_genes=genes, verbose=verbose)
-
-    # ------------------------------------------------------------------
-    # Punto de extension para seleccion automatica futura
-    # ------------------------------------------------------------------
-
-    def _auto_select(self, expr_norm: pd.DataFrame) -> list[str]:
-        """
-        Punto de extension para seleccion automatica de genes core.
-
-        Subclasificar :class:`CoreGeneSelector` y sobrescribir este metodo
-        para implementar seleccion basada en datos (p.ej. criterios de
-        ritmicidad, correlacion con el reloj circadiano, etc.).
-
-        Raises
-        ------
-        NotImplementedError
-            Siempre, hasta que se implemente en una subclase.
-        """
-        raise NotImplementedError(
-            "Seleccion automatica de genes core no implementada todavia. "
-            "Subclasifica CoreGeneSelector y sobrescribe _auto_select()."
-        )
