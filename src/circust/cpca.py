@@ -620,7 +620,7 @@ class CPCA:
         """
         Ajusta el spline periodico (independiente de FMM) en cada gen
         core usando el ordenamiento CPCA inicial. Solo genes core, no
-        eigengenes (a diferencia de _fit_initial): esto alimenta
+        eigengenes: esto alimenta
         exclusivamente la deteccion de outliers.
 
         Returns

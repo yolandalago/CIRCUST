@@ -15,7 +15,8 @@ Sincronizacion manual basada en genes ancla conocidos
   π en la escala circular — su pico define el punto de arranque.
 * Un gen de direccion (``direction_gene``, por defecto DBP) determina la
   orientacion (CW vs CCW): si su pico cae en la mitad incorrecta se invierte.
-* Un gen de consistencia (``consistency_gene``, por defecto CRY1) participa
+* Una lista de pares de genes con orden de pico conocido a priori
+  (``consistency_pairs``, por defecto solo ``DBP ≺ CRY1 ≺ ARNTL``) participa
   en una verificacion de consistencia biologica refinada (Paso 2.2).
 
 Paso 2.1 — Rotacion y determinacion de direccion:
@@ -26,12 +27,25 @@ Paso 2.1 — Rotacion y determinacion de direccion:
 
 Paso 2.2 — Verificacion de consistencia biologica:
     Si direction_gene esta demasiado cerca de 0 o π, o menos de la mitad
-    de los genes sin anchor/direction tienen pico en [0, π), y el orden
-    direction < consistency < anchor NO se cumple, entonces invertir.
+    de los genes sin anchor/direction tienen pico en [0, π), se consulta
+    ``consistency_pairs``: por cada par ``(g1, g2)`` presente en los genes
+    core y con R² >= ``consistency_r2_min`` para ambos, se comprueba si
+    peak(g1) < peak(g2). Si mas pares discrepan que coinciden, se invierte;
+    en empate o sin pares validos con evidencia, se mantiene la orientacion
+    del Paso 2.1 (salvo que no haya NINGUN par valido, en cuyo caso se
+    invierte por defecto sin evidencia, igual que el metodo original cuando
+    el gen de consistencia no esta disponible).
+
+    Esto generaliza la tripleta fija original (direction < consistency <
+    anchor, un unico par encadenado) a una lista configurable de relaciones
+    de orden a priori: el propio script R de CIRCUST evaluaba muchas
+    tripletas candidatas por tejido (ver ``rscripts/functionGTEX_cores.R``,
+    lineas 1907-1990) en vez de confiar en una unica combinacion fija; aqui
+    se deja preparado para anadir mas conocimiento biologico segun se valide.
 
 Posicion en el pipeline
 -----------------------
-    OutlierRefiner  →  CircularSynchronizer  →  (Etapa 3)
+    CPCA  →  CircularSynchronizer  →  (Etapa 3)
 """
 import numpy as np
 import pandas as pd
@@ -41,6 +55,17 @@ from math import pi
 from circust.cpca import CPCAResult
 from circust.fitting.fmm import FMMModel
 from circust.fitting.rhythm_model import FitResult
+
+
+# Unica relacion de orden a priori con respaldo directo: es la cadena que ya
+# usaba el metodo original (direction < consistency < anchor, con DBP, CRY1 y
+# ARNTL). No se anaden mas genes por defecto (RORA, STAT3, CRY2, PER1-3) sin
+# verificar antes su relacion de fase en la bibliografia: una relacion a
+# priori incorrecta es peor que no tener ninguna.
+DEFAULT_CONSISTENCY_PAIRS: list[tuple[str, str]] = [
+    ("DBP",  "CRY1"),
+    ("CRY1", "ARNTL"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +199,20 @@ class CircularSynchronizer:
         que su pico caiga en [0, π) (fase activa) tras la rotacion.
         Por defecto: ``"DBP"``.
 
-    consistency_gene : str
-        Gen auxiliar usado en la verificacion de consistencia biologica
-        del Paso 2.2. Se comprueba el orden direction < consistency < anchor.
-        Por defecto: ``"CRY1"``.
+    consistency_pairs : list[tuple[str, str]], opcional
+        Lista de pares ``(g1, g2)`` con orden de pico conocido a priori
+        (se espera peak(g1) < peak(g2)), usada en la verificacion de
+        consistencia biologica del Paso 2.2. Cada par se evalua de forma
+        independiente y solo cuenta si ambos genes estan en los genes
+        core y su R² de ajuste FMM es >= ``consistency_r2_min``. Se
+        invierte la orientacion si mas pares discrepan que coinciden.
+        Por defecto: ``DEFAULT_CONSISTENCY_PAIRS`` (``DBP < CRY1 < ARNTL``,
+        la unica relacion con respaldo directo del metodo original).
+
+    consistency_r2_min : float
+        R² minimo (ambos genes del par) para que un par de
+        ``consistency_pairs`` cuente como evidencia valida en el Paso 2.2.
+        Por defecto: 0.5.
 
     verbose : bool
         Imprimir mensajes de progreso.
@@ -191,15 +226,20 @@ class CircularSynchronizer:
 
     def __init__(
         self,
-        anchor_gene:      str  = "ARNTL",
-        direction_gene:   str  = "DBP",
-        consistency_gene: str  = "CRY1",
-        verbose:          bool = True,
+        anchor_gene:        str  = "ARNTL",
+        direction_gene:     str  = "DBP",
+        consistency_pairs:  list[tuple[str, str]] | None = None,
+        consistency_r2_min: float = 0.5,
+        verbose:            bool = True,
     ) -> None:
-        self.anchor_gene      = anchor_gene
-        self.direction_gene   = direction_gene
-        self.consistency_gene = consistency_gene
-        self.verbose          = verbose
+        self.anchor_gene        = anchor_gene
+        self.direction_gene     = direction_gene
+        self.consistency_pairs  = (
+            list(consistency_pairs) if consistency_pairs is not None
+            else list(DEFAULT_CONSISTENCY_PAIRS)
+        )
+        self.consistency_r2_min = consistency_r2_min
+        self.verbose            = verbose
 
     # ------------------------------------------------------------------
     # API publica
@@ -236,10 +276,10 @@ class CircularSynchronizer:
         self._log("  Paso 2.2 — verificando consistencia biologica ...")
         (o_fin, esc_fin, mat_fin, peaks_fin,
          pars_fin, flipped_22, ind_new) = self._basic_order(
-            o_pre, esc_pre, mat_pre, peaks_pre, par_pre, core_genes
+            o_pre, esc_pre, mat_pre, peaks_pre, par_pre, r2_fmm, core_genes
         )
 
-        direction_flipped = reversed_21 ^ flipped_22
+        direction_flipped = reversed_21 ^ flipped_22 #Se aplica xor
 
         result = SynchronizationResult(
             sample_order           = o_fin,
@@ -377,18 +417,17 @@ class CircularSynchronizer:
         mat:        pd.DataFrame,
         peaks:      np.ndarray,
         par:        np.ndarray,
+        r2_fmm:     np.ndarray,
         core_genes: list[str],
     ) -> tuple:
         """
-        Paso 2.2 — Equivalente en R: ``basicOder_cores``.
+        Paso 2.2 .
 
         Returns
         -------
         o_new, esc_new, mat_new, peaks_new, pars_new, flipped, ind_new
         """
-        anchor_i      = core_genes.index(self.anchor_gene)      if self.anchor_gene      in core_genes else None
-        direction_i   = core_genes.index(self.direction_gene)   if self.direction_gene   in core_genes else None
-        consistency_i = core_genes.index(self.consistency_gene) if self.consistency_gene in core_genes else None
+        direction_i = core_genes.index(self.direction_gene) if self.direction_gene in core_genes else None
 
         if direction_i is None:
             self._log(
@@ -403,7 +442,7 @@ class CircularSynchronizer:
 
         # Contar genes con pico en el semicirculo [0, pi), excluyendo anchor y
         # direction. El intervalo es el mismo que usa la clasificacion dia/noche
-        # de ``_pre_order``: antes uno abria en 0 y el otro lo cerraba, de modo
+        # antes uno abria en 0 y el otro lo cerraba, de modo
         # que un pico exactamente en 0 contaba como "dia" pero no computaba
         # aqui.
         peak_d = sum(
@@ -417,21 +456,43 @@ class CircularSynchronizer:
         p6pm  = 1.0 - np.cos(direction_peak - pi)
         aviso = (p6am <= 0.1) or (p6pm <= 0.1) or (peak_d < mitad)
 
-        if aviso and consistency_i is not None and anchor_i is not None:
-            excl = (peaks[direction_i] < peaks[consistency_i] < peaks[anchor_i])
-            flip = not excl
-        elif aviso:
-            # Sin gen de consistencia la orientacion se invierte por defecto.
-            # Se avisa porque es una decision tomada sin evidencia: ocurre, por
-            # ejemplo, con el conjunto core de Ruben et al. (2018), que incluye
-            # CRY2 pero no CRY1.
-            self._log(
-                f"  AVISO: se ha producido una situacion de aviso sobre la "
-                f"orientacion y el gen de consistencia ({self.consistency_gene}) "
-                f"no esta entre los genes core disponibles. La orientacion se "
-                f"invierte por defecto, sin verificar la relacion de fases."
-            )
-            flip = True
+        if aviso:
+            gene_idx = {g: i for i, g in enumerate(core_genes)}
+            n_agree  = 0
+            n_valid  = 0
+            for g_before, g_after in self.consistency_pairs:
+                i_before = gene_idx.get(g_before)
+                i_after  = gene_idx.get(g_after)
+                if i_before is None or i_after is None:
+                    continue
+                if (r2_fmm[i_before] < self.consistency_r2_min
+                        or r2_fmm[i_after] < self.consistency_r2_min):
+                    continue
+                n_valid += 1
+                if peaks[i_before] < peaks[i_after]:
+                    n_agree += 1
+
+            if n_valid > 0:
+                n_disagree = n_valid - n_agree
+                flip = n_agree < n_disagree
+                self._log(
+                    f"    Verificacion de consistencia: {n_agree}/{n_valid} "
+                    f"pares de orden a priori se cumplen."
+                )
+            else:
+                # Sin ningun par valido (genes ausentes o mal ajustados) la
+                # orientacion se invierte por defecto. Se avisa porque es una
+                # decision tomada sin evidencia: ocurre, por ejemplo, con el
+                # conjunto core de Ruben et al. (2018), que incluye CRY2 pero
+                # no CRY1.
+                self._log(
+                    f"  AVISO: se ha producido una situacion de aviso sobre "
+                    f"la orientacion y ningun par de consistency_pairs esta "
+                    f"disponible/bien ajustado (R2 >= {self.consistency_r2_min}) "
+                    f"entre los genes core. La orientacion se invierte por "
+                    f"defecto, sin verificar ninguna relacion de fases."
+                )
+                flip = True
         else:
             flip = False
 
@@ -447,7 +508,6 @@ class CircularSynchronizer:
             o_new           = o[::-1].copy()
             esc_new         = (2.0 * pi - esc[::-1]) % (2.0 * pi)
             mat_new         = mat.iloc[:, ::-1].copy()
-            # ``iloc`` preserva los nombres de muestra; no reseteamos columnas
             pars_new        = par.copy()
             pars_new[:, 2]  = (2.0 * pi - par[:, 2]) % (2.0 * pi)  # α
             pars_new[:, 3]  = (2.0 * pi - par[:, 3]) % (2.0 * pi)  # β

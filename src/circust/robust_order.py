@@ -370,8 +370,11 @@ class RobustOrderEstimator:
           multiplica por 2 a 5 el error mediano de fase.
     r2_min : float
         R² parametrico minimo en cada extraccion. Por defecto 0.5.
-    anchor_gene, direction_gene, consistency_gene : str
+    anchor_gene, direction_gene : str
         Genes ancla para sincronizacion.
+    consistency_pairs : list[tuple[str, str]] | None
+        Pares de orden a priori para la verificacion de consistencia del
+        Paso 2.2 de :class:`CircularSynchronizer`. Ver su docstring.
     fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps : int
         Hiperparametros FMM base.
     fmm_method : str
@@ -403,7 +406,7 @@ class RobustOrderEstimator:
         r2_min:                float = 0.5,
         anchor_gene:           str   = "ARNTL",
         direction_gene:        str   = "DBP",
-        consistency_gene:      str   = "CRY1",
+        consistency_pairs:     list[tuple[str, str]] | None = None,
         fmm_length_alpha_grid: int   = 48,
         fmm_length_omega_grid: int   = 24,
         fmm_num_reps:          int   = 3,
@@ -445,7 +448,7 @@ class RobustOrderEstimator:
         self.r2_min               = r2_min
         self.anchor_gene          = anchor_gene
         self.direction_gene       = direction_gene
-        self.consistency_gene     = consistency_gene
+        self.consistency_pairs    = consistency_pairs
         self._fmm_kwargs = dict(
             length_alpha_grid=fmm_length_alpha_grid,
             length_omega_grid=fmm_length_omega_grid,
@@ -761,10 +764,10 @@ class RobustOrderEstimator:
         # (en stab se reasigna por rep porque depende de la escala k)
         fmm = FMMModel(**self._fmm_kwargs) if self.fmm_method == "base" else None
         prelim = CircularSynchronizer(
-            anchor_gene      = self.anchor_gene,
-            direction_gene   = self.direction_gene,
-            consistency_gene = self.consistency_gene,
-            verbose          = False,
+            anchor_gene       = self.anchor_gene,
+            direction_gene    = self.direction_gene,
+            consistency_pairs = self.consistency_pairs,
+            verbose           = False,
         )
 
         sample_orders = np.zeros((K, n_samp), dtype=int)
