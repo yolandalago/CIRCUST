@@ -14,7 +14,7 @@ Implementa la seleccion de genes TOP segun la Seccion 3 de CIRCUST:
   3. Filtro FMM: ajustar el modelo FMM a los supervivientes y
      seleccionar aquellos que sean
      (i) no puntiagudos (omega > 0.1),
-     (ii) altamente ritmicos (R2_FMM > 0.5),
+     (ii) altamente ritmicos (R2_FMM >= 0.5),
      (iii) picos (t_U) distribuidos en los 4 cuadrantes de [0, 2pi).
 
   4. Genes semilla forzados: los 12 genes reloj centrales se
@@ -399,7 +399,7 @@ class TopGeneSelector:
     1. Ajustar ORI a cada gen y calcular R2_ORI.
     2. Descartar genes con R2_ORI < ``r2_ori_threshold`` (0.5).
     3. Ajustar FMM a los supervivientes.
-    4. Filtrar: omega > ``omega_min`` (0.1) Y R2_FMM > ``r2_fmm_threshold`` (0.5).
+    4. Filtrar: omega > ``omega_min`` (0.1) Y R2_FMM >= ``r2_fmm_threshold`` (0.5).
     5. Repartir los picos FMM en ``n_sectors`` sectores y quedarse, dentro de
        cada uno, con los de mayor R2_FMM hasta completar ``target_size``.
     6. Forzar inclusion de los genes core si no estan presentes.
