@@ -11,13 +11,25 @@ A diferencia del FMM base (``fmm.py``), este enfoque:
    distribuciones no uniformes de las muestras en el circulo.
 3. Reemplaza la minimizacion del RSS por un **criterio de potencia
    penalizado**: J(alpha, omega) = P(alpha, omega) - lambda * g(omega) * R(alpha, omega).
-4. Refina (alpha, omega) con busqueda local 2D + WLS cerrado para los
-   parametros lineales, en vez de Nelder-Mead 5D.
+4. Opcionalmente refina (alpha, omega) con busqueda de patron 2D (Algoritmo
+   S2) + WLS cerrado para los parametros lineales, en vez de Nelder-Mead 5D.
+   Desactivado por defecto, como en el pipeline publicado de CircaFMM
+   (``runCircaFMM.R``, ``refine = FALSE``) y como en la calibracion de lambda,
+   que nunca refina.
 5. Calibra ``lambda`` automaticamente bajo H0 mediante Monte Carlo + codo.
 
 El resultado es un ajuste mas robusto al ruido y mas eficiente para
 datasets grandes (la rejilla y el cache se precomputan una sola vez y
 se reutilizan para todos los genes).
+
+Valores por defecto
+-------------------
+Donde el articulo (Abston, Larriba y Fernandez, 2026) no fija un valor se
+toman los del script de analisis publicado por los autores,
+``runCircaFMM.R`` del repositorio ``FMMGroupVa/CircaFMM``: 48 valores de
+alpha, 50 valores de omega equiespaciados en ``[0.02, 1]``, rugosidad
+``R_dense`` con 512 puntos, ``omega0 = 0.1``, ``p = 3``, sin refinamiento,
+y calibracion con B = 1000, R = 5, q = 0.975 y mediana movil de ventana 3.
 """
 from __future__ import annotations
 
@@ -458,7 +470,11 @@ def precompute_grid(
     alpha_grid : np.ndarray, opcional
         Rejilla de alpha. Por defecto: 48 valores en ``[0, 2*pi)``.
     omega_grid : np.ndarray, opcional
-        Rejilla de omega. Por defecto: 30 valores log-espaciados en ``[1e-4, 1]``.
+        Rejilla de omega. Por defecto: 50 valores equiespaciados en
+        ``[0.02, 1]``, que es la rejilla del pipeline publicado de CircaFMM
+        (``runCircaFMM.R``). La funcion R ``fmm_grid_precompute`` trae como
+        valor por defecto 30 valores log-espaciados en ``[1e-4, 1]``; el
+        articulo no fija ninguna de las dos.
     n_dense : int
         Tamano de la rejilla temporal densa. Por defecto 512.
     """
@@ -472,7 +488,7 @@ def precompute_grid(
     if alpha_grid is None:
         alpha_grid = np.linspace(0.0, 2.0 * np.pi, 48, endpoint=False)
     if omega_grid is None:
-        omega_grid = np.exp(np.linspace(np.log(1e-4), np.log(1.0), 30))
+        omega_grid = np.linspace(0.02, 1.0, 50)
 
     alpha_grid = np.asarray(alpha_grid, dtype=np.float64) % (2.0 * np.pi)
     omega_grid = np.clip(np.asarray(omega_grid, dtype=np.float64), 0.0, 1.0)
@@ -535,7 +551,7 @@ def precompute_grid(
 def prepare_cache(
     weights: np.ndarray,
     grid:    FMMGrid,
-    ridge:   float = 1e-8,
+    ridge:   float = 1e-10,
 ) -> FMMCache:
     """Calcula la inversa ``(X'WX)^{-1}`` para cada punto de rejilla.
 
@@ -557,7 +573,8 @@ def prepare_cache(
     grid : FMMGrid
         Rejilla precomputada.
     ridge : float
-        Regularizacion diagonal para estabilidad.
+        Regularizacion diagonal para estabilidad. Por defecto 1e-10, el mismo
+        valor que ``fmm_cache_prepare`` en el codigo R de CircaFMM.
     """
     w = _normalize_weights_to_n(weights)
     if w.shape[0] != grid.times.shape[0]:
@@ -948,7 +965,7 @@ def _refine_jit(
 def fit_gene(
     data:         np.ndarray,
     prepared:     FMMPreparedDataset,
-    refine:       bool = True,
+    refine:       bool = False,
     refine_steps: int  = 3,
 ) -> FitResult:
     """Ajuste FMM estabilizado para un gen.
@@ -963,6 +980,14 @@ def fit_gene(
     En el paso 2 se toma el maximo sin tolerancias ni desempates, que es como
     lo define la Seccion S3.4.3 del articulo. La regla de tolerancia relativa y
     el criterio secundario aparecen unicamente en el refinamiento del paso 3.
+
+    ``refine`` esta desactivado por defecto: el articulo lo describe como
+    opcional, el pipeline publicado (``runCircaFMM.R``) lo ejecuta con
+    ``refine = FALSE`` y la calibracion de ``lambda`` (Algoritmo S3) nunca
+    refina, de modo que con ``refine=True`` el ajuste por gen no seria el
+    mismo procedimiento con el que se calibro ``lambda*``. En ``omega = 1`` el
+    Algoritmo S2 es ademas degenerado (la direccion ``alpha`` es plana porque
+    ``beta`` la absorbe) y su resultado depende del redondeo.
 
     ``refine_steps`` es el numero ``S`` de pasos de la busqueda de patron. El
     valor por defecto, 3, es el del articulo.
@@ -1009,7 +1034,7 @@ def fit_gene(
             float(alpha), float(omega), float(scores_safe[idx]),
             lambda_, omega0, p,
             int(refine_steps),
-            (2.0 * np.pi) / max(48, len(grid.alpha_grid)),   # Delta_alpha
+            (2.0 * np.pi) / 48.0,                            # Delta_alpha (S3.4.4)
             1.25,                                            # eta
             1e-4, 1.0,                                       # omega_min, omega_max
             1e-4,                                            # tau
@@ -1076,6 +1101,51 @@ def _spike_max_jump(y: np.ndarray, order: np.ndarray) -> float:
     return float(diffs.max())
 
 
+def _runmed_r(y: np.ndarray, k: int) -> np.ndarray:
+    """``stats::runmed(y, k, endrule = "median")`` de R.
+
+    Mediana movil de ventana impar ``k`` en el interior y regla de Tukey en
+    los extremos (``stats::smoothEnds``). Para ``k = 3`` la regla es
+
+        y[0]  = med3(y[0],  s[1],  3 s[1]  - 2 s[2])
+        y[-1] = med3(y[-1], s[-2], 3 s[-2] - 2 s[-3])
+
+    con ``s`` la serie suavizada. Para ``k > 3`` R suaviza primero los
+    ``(k-1)/2`` puntos de cada extremo con ventanas crecientes ``3, 5, ...``
+    aplicadas sobre la serie que sale de la mediana movil (interior suavizado,
+    extremos sin tocar), y despues aplica la regla anterior al primer y
+    ultimo punto. Se replica esa misma secuencia.
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.shape[0]
+    if k <= 1 or n < 3:
+        return y.copy()
+    k = min(k, n if n % 2 == 1 else n - 1)
+    h = k // 2
+
+    # runmed con iend = 0 ("keep"): interior suavizado, h puntos de cada
+    # extremo sin tocar
+    res = y.copy()
+    for i in range(h, n - h):
+        res[i] = np.median(y[i - h:i + h + 1])
+
+    # smoothEnds(res, k)
+    def med3(a, b, c):
+        return float(np.median([a, b, c]))
+
+    sm = res.copy()
+    if h >= 2:
+        sm[1]     = med3(res[0], res[1], res[2])
+        sm[n - 2] = med3(res[n - 1], res[n - 2], res[n - 3])
+        for i in range(3, h + 1):           # i = 3..h, ventana j = 2i-1
+            j = 2 * i - 1
+            sm[i - 1] = np.median(res[0:j])
+            sm[n - i] = np.median(res[n - j:n])
+    sm[0]     = med3(res[0],     sm[1],     3.0 * sm[1]     - 2.0 * sm[2])
+    sm[n - 1] = med3(res[n - 1], sm[n - 2], 3.0 * sm[n - 2] - 2.0 * sm[n - 3])
+    return sm
+
+
 def _pick_lambda_elbow(
     lambda_grid: np.ndarray,
     q_spike:     np.ndarray,
@@ -1088,6 +1158,18 @@ def _pick_lambda_elbow(
       1. Suaviza ``q_spike`` con mediana movil (ventana ``smooth_k``).
       2. Traza la cuerda del primer al ultimo punto.
       3. El codo es el punto interno mas alejado de la cuerda.
+
+    La mediana movil replica ``stats::runmed(y, k, endrule = "median")`` de
+    R, que es lo que usa ``pick_lambda_elbow`` en el codigo de CircaFMM. Los
+    puntos interiores se sustituyen por la mediana de su ventana y los dos
+    extremos por la regla de Tukey (``smoothEnds``): para ``k = 3``
+
+        y[0]  = mediana(y[0],  s[1],  3 s[1]  - 2 s[2]),
+        y[-1] = mediana(y[-1], s[-2], 3 s[-2] - 2 s[-3]),
+
+    con ``s`` la serie ya suavizada en el interior. Importa porque los dos
+    extremos definen la cuerda del criterio de distancia. Para ventanas
+    mayores que 3 se aplica la recursion de ``smoothEnds`` de R.
     """
     lam = np.asarray(lambda_grid, dtype=float)
     y_raw = np.asarray(q_spike,   dtype=float)
@@ -1098,16 +1180,9 @@ def _pick_lambda_elbow(
     o = np.argsort(lam)
     lam = lam[o]; y_raw = y_raw[o]
 
-    # Alisado con mediana movil de ventana impar.
-    # Se usa ``median_filter(mode='nearest')`` y no ``scipy.signal.medfilt``
-    # porque este ultimo rellena con ceros fuera del borde: con una curva
-    # positiva y decreciente sustituye Q(lambda_1) y Q(lambda_L) por el minimo
-    # de sus vecinos, y esos dos puntos son justamente los que definen la
-    # cuerda del criterio de distancia con el que se localiza el codo.
     if smooth_k and smooth_k > 1:
-        from scipy.ndimage import median_filter
         k = smooth_k if smooth_k % 2 == 1 else smooth_k + 1
-        y = median_filter(y_raw, size=k, mode="nearest")
+        y = _runmed_r(y_raw, k)
     else:
         y = y_raw
 
@@ -1303,7 +1378,8 @@ def prepare_dataset(
     weights:           Optional[np.ndarray] = None,
     lambda_star:       Optional[float]      = None,
     length_alpha_grid: int   = 48,
-    length_omega_grid: int   = 30,
+    length_omega_grid: int   = 50,
+    omega_min:         float = 0.02,
     omega_max:         float = 1.0,
     omega0:            float = 0.10,
     penalty_power:     float = 3.0,
@@ -1323,7 +1399,8 @@ def prepare_dataset(
 
     1. Si ``weights`` es None: pesos de densidad temporal von Mises
        (kappa seleccionado por LOO-CV).
-    2. Construir rejillas alpha/omega (defaults equivalentes al codigo R).
+    2. Construir rejillas alpha/omega (defaults del pipeline publicado
+       ``runCircaFMM.R``: 48 alphas y 50 omegas equiespaciados en [0.02, 1]).
     3. ``precompute_grid`` (incluye la rugosidad densa).
     4. ``prepare_cache`` con los pesos.
     5. Si ``lambda_star`` es None: ``calibrate_lambda_repeat`` con
@@ -1340,8 +1417,8 @@ def prepare_dataset(
         Si se proporciona, salta la calibracion Monte Carlo.
     length_alpha_grid, length_omega_grid : int
         Tamano de las rejillas alpha y omega.
-    omega_max : float
-        Cota superior de omega (default 1.0).
+    omega_min, omega_max : float
+        Extremos de la rejilla de omega, equiespaciada (defaults 0.02 y 1.0).
     omega0, penalty_power : float
         Parametros de la funcion de penalizacion ``g(omega)``.
     n_dense : int
@@ -1361,7 +1438,7 @@ def prepare_dataset(
 
     # 2-3. Rejillas + grid + rugosidad densa
     alpha_grid = np.linspace(0.0, 2.0 * np.pi, length_alpha_grid, endpoint=False)
-    omega_grid = np.exp(np.linspace(np.log(1e-4), np.log(omega_max), length_omega_grid))
+    omega_grid = np.linspace(omega_min, omega_max, length_omega_grid)
 
     grid = precompute_grid(times, alpha_grid=alpha_grid, omega_grid=omega_grid,
                            n_dense=n_dense)
@@ -1445,7 +1522,7 @@ class StabilizedFMMModel(RhythmModel):
         de forma lazy en el primer ``fit()``.
     refine : bool
         Si aplicar el refinamiento local del Algoritmo S2 tras la seleccion
-        sobre la rejilla.
+        sobre la rejilla. Por defecto ``False`` (ver :func:`fit_gene`).
     refine_steps : int
         Numero ``S`` de pasos del refinamiento. Por defecto 3, el del articulo.
     **prep_kwargs
@@ -1455,7 +1532,7 @@ class StabilizedFMMModel(RhythmModel):
     def __init__(
         self,
         prepared:     Optional[FMMPreparedDataset] = None,
-        refine:       bool = True,
+        refine:       bool = False,
         refine_steps: int  = 3,
         **prep_kwargs,
     ) -> None:

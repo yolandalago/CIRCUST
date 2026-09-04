@@ -39,6 +39,16 @@ Paso 2 — Refinamiento Nelder-Mead
 Los Pasos 1+2 se repiten ``num_reps`` veces, cada vez estrechando la
 rejilla alrededor de la mejor estimacion anterior.
 
+Restricciones de estabilidad (Algoritmo 1 del suplemento de Rueda et al.
+2019, y ``bestStep1``/``step2FMM`` del paquete R FMM hasta la version 0.3.1)
+
+    M + A <= max(X) + 1.96 * sigma
+    M - A >= min(X) - 1.96 * sigma,     sigma = sqrt(SSE / (n - 5))
+
+donde ``SSE`` es la suma de cuadrados residual del propio candidato. El
+umbral depende por tanto del ruido estimado de cada candidato y no de un
+porcentaje fijo del rango de los datos.
+
 Devuelve
 --------
 FitResult
@@ -97,14 +107,16 @@ def _fmm_objective_jit(
     params: np.ndarray,
     data:   np.ndarray,
     t:      np.ndarray,
-    upper:  float,
-    lower:  float,
+    data_max: float,
+    data_min: float,
     omega_max: float,
     buf:    np.ndarray,
 ) -> float:
     """
-    Objetivo Nelder-Mead compilado. Devuelve +inf cuando los parametros
-    violan las restricciones de estabilidad de amplitud o rangos validos.
+    Objetivo Nelder-Mead compilado (``step2FMM`` de R). Devuelve +inf cuando
+    los parametros violan las restricciones de estabilidad de amplitud
+    (``M +/- A`` dentro de ``max/min(X) +/- 1.96 sigma``, con ``sigma``
+    estimada del RSS del propio candidato) o los rangos validos de A y omega.
     """
     M     = params[0]
     A     = params[1]
@@ -112,8 +124,6 @@ def _fmm_objective_jit(
     beta  = params[3]
     omega = params[4]
 
-    if (M + A) > upper: return np.inf
-    if (M - A) < lower: return np.inf
     if A <= 0.0:        return np.inf
     if omega <= 0.0:    return np.inf
     if omega > omega_max: return np.inf
@@ -125,7 +135,13 @@ def _fmm_objective_jit(
         pred = M + A * np.cos(beta + mob)
         d    = pred - data[i]
         rss += d * d
-    return rss / n
+    rss /= n
+
+    dof   = n - 5 if n > 5 else 1
+    sigma = np.sqrt(rss * n / dof)
+    if (M + A) > data_max + 1.96 * sigma: return np.inf
+    if (M - A) < data_min - 1.96 * sigma: return np.inf
+    return rss
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +455,6 @@ def _step1_grid_cuda(
     array (A*W, 6) — mismo layout que ``_step1_grid`` (CPU).
     """
     from numba import cuda as _cuda
-    import math
 
     An, Wn, N = len(alpha_grid), len(omega_grid), len(t)
     AW = An * Wn
@@ -452,7 +467,34 @@ def _step1_grid_cuda(
     omega_d    = _cuda.to_device(omega_flat)
     out_d      = _cuda.device_array((AW, 6), dtype=np.float64)
 
-    @_cuda.jit
+    _grid_kernel = _get_cuda_grid_kernel()
+    threads_per_block = 128
+    blocks = (AW + threads_per_block - 1) // threads_per_block
+    _grid_kernel[blocks, threads_per_block](
+        alpha_d, omega_d, data_d, t_d, out_d, N
+    )
+    return out_d.copy_to_host()
+
+
+_CUDA_GRID_KERNEL = None
+
+
+def _get_cuda_grid_kernel():
+    """Devuelve el kernel CUDA del paso 1, compilado una sola vez por proceso.
+
+    Antes el kernel se definia dentro de ``_step1_grid_cuda``, de modo que
+    Numba creaba y compilaba un dispatcher nuevo en cada llamada (unos 300 ms
+    por rejilla, frente a menos de 1 ms del camino CPU). Aqui se construye de
+    forma perezosa y se guarda en un global del modulo.
+    """
+    global _CUDA_GRID_KERNEL
+    if _CUDA_GRID_KERNEL is not None:
+        return _CUDA_GRID_KERNEL
+
+    from numba import cuda as _cuda
+    import math
+
+    @_cuda.jit(cache=True)
     def _grid_kernel(alpha_arr, omega_arr, data_arr, t_arr, out, n_samples):
         idx = _cuda.grid(1)
         if idx >= alpha_arr.shape[0]:
@@ -530,12 +572,8 @@ def _step1_grid_cuda(
         out[idx, 4] = omega
         out[idx, 5] = rss
 
-    threads_per_block = 128
-    blocks = (AW + threads_per_block - 1) // threads_per_block
-    _grid_kernel[blocks, threads_per_block](
-        alpha_d, omega_d, data_d, t_d, out_d, N
-    )
-    return out_d.copy_to_host()
+    _CUDA_GRID_KERNEL = _grid_kernel
+    return _grid_kernel
 
 
 def _best_step1(
@@ -544,20 +582,24 @@ def _best_step1(
 ) -> np.ndarray | None:
     """
     Selecciona el candidato de la rejilla con menor RSS que satisfaga
-    las restricciones de estabilidad de amplitud.
+    las restricciones de estabilidad de amplitud (``bestStep1`` de R).
 
-    Estabilidad: M+A <= max(datos) + 10% rango  Y  M-A >= min(datos) - 10% rango.
+    Estabilidad:  M+A <= max(X) + 1.96 sigma  Y  M-A >= min(X) - 1.96 sigma,
+    con  sigma = sqrt(RSS * n / (n - 5))  calculada del RSS (medio) de cada
+    candidato, como en el Algoritmo 1 del suplemento de Rueda et al. (2019).
     """
     order    = np.argsort(grid_results[:, 5])   # ordenar por RSS
     data_min = data.min()
     data_max = data.max()
-    slack    = 0.1 * (data_max - data_min)
+    n        = len(data)
+    dof      = n - 5 if n > 5 else 1
 
     for idx in order:
         row   = grid_results[idx]
-        M, A  = row[0], row[1]
-        if np.isnan(M) or np.isnan(A):
+        M, A, rss = row[0], row[1], row[5]
+        if np.isnan(M) or np.isnan(A) or np.isnan(rss):
             continue
+        slack = 1.96 * np.sqrt(rss * n / dof)
         if (M + A) <= (data_max + slack) and (M - A) >= (data_min - slack):
             return row
     return None
@@ -569,10 +611,11 @@ def _make_step2_objective(
     omega_max: float,
 ) -> callable:
     """
-    Construye la funcion objetivo para Nelder-Mead con limites precalculados.
+    Construye la funcion objetivo para Nelder-Mead (``step2FMM`` de R).
 
-    Evita recalcular min/max/margen en cada evaluacion (se llama miles de
-    veces por ajuste).
+    Precalcula min/max de los datos (se llama miles de veces por ajuste).
+    La holgura de la restriccion de amplitud, ``1.96 sigma``, depende del
+    RSS de cada candidato y se evalua dentro del objetivo.
 
     Si Numba esta disponible, la funcion objetivo es un wrapper delgado
     sobre un nucleo JIT-compilado. Si no, cae en la implementacion pura
@@ -580,29 +623,29 @@ def _make_step2_objective(
     """
     data_min = float(data.min())
     data_max = float(data.max())
-    slack    = 0.1 * (data_max - data_min)
-    upper    = data_max + slack
-    lower    = data_min - slack
     n        = len(t)
+    dof      = n - 5 if n > 5 else 1
 
     if _HAS_NUMBA:
         buf = np.empty(n, dtype=np.float64)
         def objective(params: np.ndarray) -> float:
             return float(_fmm_objective_jit(
                 np.ascontiguousarray(params, dtype=np.float64),
-                data, t, upper, lower, omega_max, buf,
+                data, t, data_max, data_min, omega_max, buf,
             ))
         return objective
 
     def objective(params: np.ndarray) -> float:
         M, A, alpha, beta, omega = params
-        if (M + A) > upper:    return np.inf
-        if (M - A) < lower:    return np.inf
         if A <= 0:             return np.inf
         if omega <= 0:         return np.inf
         if omega > omega_max:  return np.inf
         fitted = _fmm_predict(t, M, A, alpha, beta, omega)
-        return float(np.sum((fitted - data)**2) / n)
+        rss    = float(np.sum((fitted - data)**2) / n)
+        sigma  = np.sqrt(rss * n / dof)
+        if (M + A) > data_max + 1.96 * sigma:  return np.inf
+        if (M - A) < data_min - 1.96 * sigma:  return np.inf
+        return rss
 
     return objective
 
@@ -646,24 +689,42 @@ class FMMModel(RhythmModel):
         length_omega_grid: int   = 24,
         omega_max:         float = 1.0,
         num_reps:          int   = 3,
-        skip_nm_r2:        float = 0.95,
+        skip_nm_r2:        float | None = None,
         early_stop_tol:    float = 1e-3,
+        use_cuda:          bool  = False,
     ) -> None:
         """
         Parameters
         ----------
-        skip_nm_r2 : float
-            Si tras el grid search del paso 1 el R² ya supera este umbral, se
-            omite el refinamiento Nelder-Mead (rara vez aporta mas que decimales
-            cuando el grid ya da buen ajuste). Por defecto 0.95. Ponerlo a >1.0
-            (ej. 1.1) desactiva esta optimizacion (NM siempre se ejecuta).
+        use_cuda : bool
+            Evaluar la rejilla del paso 1 en GPU (``_step1_grid_cuda``) si
+            Numba detecta un dispositivo CUDA. Por defecto ``False``: con las
+            rejillas por defecto (48 x 24) y n de decenas a cientos de
+            muestras, el camino CPU compilado tarda 0.2-2.5 ms por rejilla y
+            el kernel CUDA en doble precision 1-11 ms (medido en una RTX 5060,
+            cuyo rendimiento FP64 es 1/64 del FP32). Ni siquiera con rejillas
+            de 115 000 puntos y n = 1000 gana la GPU (219 ms CPU frente a
+            351 ms CUDA). Para que compensara habria que pasar el kernel a
+            precision simple o paralelizar por genes en vez de por rejilla,
+            lo que queda como trabajo futuro. Se mantiene como camino
+            verificado (coincide con la CPU a 1e-8) pero desactivado.
+
+        skip_nm_r2 : float or None
+            Si se da un valor y tras el grid search del paso 1 el R² ya lo
+            supera, se omite el refinamiento Nelder-Mead. Por defecto ``None``:
+            Nelder-Mead se ejecuta siempre, como en el Algoritmo 1 de Rueda et
+            al. (2019) y en el paquete R. Se ha medido que un umbral de 0.95
+            cambia el pico mas de 0.01 rad en un 7-19 % de los genes y empeora
+            el RSS mas de un 1 % en un 9-15 %, asi que solo debe activarse como
+            atajo exploratorio, nunca en resultados definitivos.
 
         early_stop_tol : float
             Tolerancia para parar el bucle ``num_reps`` cuando los parametros
             convergen entre iteraciones consecutivas. Si todos los cambios
             absolutos en (alpha, beta, omega) son menores que esta tolerancia,
             se omite la siguiente iteracion. Por defecto 1e-3. Ponerlo a 0
-            desactiva esta optimizacion.
+            desactiva esta optimizacion. Su efecto medido sobre el RSS es
+            inferior a 1e-5 relativo, de modo que no altera el resultado.
         """
         self.length_alpha_grid = length_alpha_grid
         self.length_omega_grid = length_omega_grid
@@ -671,6 +732,7 @@ class FMMModel(RhythmModel):
         self.num_reps          = num_reps
         self.skip_nm_r2        = skip_nm_r2
         self.early_stop_tol    = early_stop_tol
+        self.use_cuda          = bool(use_cuda) and _HAS_CUDA
 
     # ------------------------------------------------------------------
     # API publica
@@ -739,10 +801,10 @@ class FMMModel(RhythmModel):
         for rep in range(self.num_reps):
 
             # ── Paso 1: busqueda en rejilla ─────────────────────────────
-            # Si hay GPU disponible (Opcion A), la rejilla se evalua en CUDA
-            # con un hilo por combinacion (alpha, omega).  Si no, se usa la
-            # version CPU vectorizada con NumPy (~3x vs bucle for puro).
-            if _HAS_CUDA:
+            # Solo si el usuario lo pide (``use_cuda``) y hay GPU, la rejilla
+            # se evalua en CUDA con un hilo por combinacion (alpha, omega).
+            # Si no, se usa la version CPU compilada con Numba (o NumPy).
+            if self.use_cuda:
                 grid_results = _step1_grid_cuda(
                     alpha_grid, omega_grid, data, time_points
                 )
@@ -757,14 +819,17 @@ class FMMModel(RhythmModel):
                 best_par = prev_best
                 break
 
-            # ── Optimizacion 1: skip Nelder-Mead si el grid ya da buen R²
-            # Calculamos el R² del mejor punto del grid; si supera el umbral,
-            # NM aporta poco mas que ruido y nos lo saltamos.
-            M_g, A_g, alpha_g, beta_g, omega_g = best_par[:5]
-            fitted_g = _fmm_predict(time_points, M_g, A_g, alpha_g, beta_g, omega_g)
-            r2_grid  = 1.0 - float(np.sum((data - fitted_g) ** 2)) / ss_tot if ss_tot > 0 else 0.0
+            # ── Atajo opcional (desactivado por defecto): saltar Nelder-Mead
+            # si el grid ya supera ``skip_nm_r2``. El Algoritmo 1 ejecuta NM
+            # siempre; ver la nota en ``__init__``.
+            skip_nm = False
+            if self.skip_nm_r2 is not None:
+                M_g, A_g, alpha_g, beta_g, omega_g = best_par[:5]
+                fitted_g = _fmm_predict(time_points, M_g, A_g, alpha_g, beta_g, omega_g)
+                r2_grid  = 1.0 - float(np.sum((data - fitted_g) ** 2)) / ss_tot if ss_tot > 0 else 0.0
+                skip_nm  = r2_grid >= self.skip_nm_r2
 
-            if r2_grid >= self.skip_nm_r2:
+            if skip_nm:
                 par_final = best_par[:5].copy()
             else:
                 # ── Paso 2: refinamiento Nelder-Mead ────────────────────
