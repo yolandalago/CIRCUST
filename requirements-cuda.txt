@@ -1,0 +1,17 @@
+# Ruta CUDA opcional del paso 1 del FMM base (``FMMModel(use_cuda=True)``).
+#
+#     pip install -r requirements.txt -r requirements-cuda.txt
+#
+# Equivalente a ``pip install -e ".[accel,cuda]"``. Necesita:
+#   - GPU NVIDIA con driver que soporte CUDA 12 (``nvidia-smi`` debe funcionar).
+#   - Nada mas del sistema: el toolkit (libcudart, NVVM, libdevice) llega en
+#     ruedas pip. Con un toolkit del sistema en /usr/local/cuda tambien vale.
+#
+# Aviso: en las GPU de consumo la doble precision va a 1/64 de la simple y la
+# rejilla por defecto (48 x 24) es pequena, asi que la CPU compilada con Numba
+# sigue siendo mas rapida (medido en una RTX 5060: 0.4 ms frente a 2.4 ms por
+# rejilla). Por eso la ruta CUDA esta desactivada por defecto.
+
+numba>=0.59
+numba-cuda[cu12]>=0.10
+nvidia-cuda-nvcc-cu12>=12.8

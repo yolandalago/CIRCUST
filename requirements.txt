@@ -1,0 +1,24 @@
+# Dependencias de CIRCUST para uso normal: algoritmo completo + aceleracion en CPU.
+#
+#     pip install -r requirements.txt
+#
+# Es equivalente a ``pip install -e ".[accel]"`` (ver pyproject.toml, que es la
+# fuente de verdad de las versiones). Para la ruta CUDA opcional del FMM base
+# ver requirements-cuda.txt. Para comprobar que el entorno esta completo:
+#
+#     python scripts/check_env.py
+#
+# Requiere Python >= 3.10.
+
+# --- algoritmo (obligatorias) ---
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+scikit-learn>=1.2
+matplotlib>=3.7
+joblib>=1.2
+pyarrow>=12.0
+
+# --- aceleracion en CPU (opcional pero recomendada; sin ella el FMM base
+#     tarda 2-3 veces mas, con resultados identicos) ---
+numba>=0.59

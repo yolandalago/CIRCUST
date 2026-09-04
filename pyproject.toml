@@ -15,14 +15,48 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.8"
+# 3.10 como minimo: el codigo usa anotaciones ``X | None`` y numba >= 0.59
+# (la version que soporta numpy 2) exige 3.10 o superior.
+requires-python = ">=3.10"
+
+# Dependencias del algoritmo. Sin ninguna de ellas el paquete no funciona.
+# ``joblib`` paraleliza el ajuste por genes y ``pyarrow`` lee y escribe las
+# matrices en Parquet (formato de entrada recomendado).
 dependencies = [
-    "numpy>=1.21",
-    "pandas>=1.3",
-    "scipy>=1.7",
-    "scikit-learn>=1.0",
-    "matplotlib>=3.4",
-    # "pyreadr>=0.4.2",  # opcional, descomenta si la necesitas
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.2",
+    "matplotlib>=3.7",
+    "joblib>=1.2",
+    "pyarrow>=12.0",
+]
+
+[project.optional-dependencies]
+# Aceleracion en CPU. Compila con Numba la rejilla y el objetivo de
+# Nelder-Mead del FMM base, la base trigonometrica y el refinamiento del FMM
+# estabilizado, y los estimadores de agregacion circular. Sin Numba todo
+# funciona igual (mismos resultados a 1e-8) pero el FMM base tarda 2-3 veces
+# mas. Recomendado para cualquier uso real.
+accel = [
+    "numba>=0.59",
+]
+# Ruta CUDA opcional del paso 1 del FMM base (``FMMModel(use_cuda=True)``).
+# Necesita una GPU NVIDIA y el toolkit CUDA 12 en ruedas pip. En las GPU de
+# consumo (doble precision a 1/64) la CPU compilada sigue siendo mas rapida;
+# se incluye para poder ejecutar y verificar ese camino.
+cuda = [
+    "numba>=0.59",
+    "numba-cuda[cu12]>=0.10",
+    "nvidia-cuda-nvcc-cu12>=12.8",
+]
+# Solo para desarrollar el paquete, no para usarlo: la suite de tests y la
+# lectura de los RData del repositorio original en R con los que se valida
+# la traduccion. Un usuario final no necesita nada de esto.
+dev = [
+    "numba>=0.59",
+    "pytest>=7.0",
+    "pyreadr>=0.4.2",
 ]
 
 [project.urls]
