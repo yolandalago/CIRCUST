@@ -44,7 +44,10 @@ Salida
     │                          tiempos reales conocidos):
     │                            sample_name     : nombre real de la muestra
     │                            circular_phase  : fase en RADIANES, [0, 2*pi) — canonico
-    │                            phase_h         : fase en HORAS,   [0, 24)  — interpretable
+    │                                              (sin convertir a horas: esa conversion
+    │                                              asume un periodo de 24h y una
+    │                                              correspondencia con la hora real del
+    │                                              dia que no esta verificada)
     │
     └── circust_atlas.csv     [M^TOP] — atlas circadiano del tejido,
                               UNA FILA POR GEN TOP. Salida cientifica
@@ -52,8 +55,7 @@ Salida
                                 gene_name      : simbolo del gen TOP
                                 r2_fmm         : R^2 del ajuste FMM
                                 amplitude      : amplitud A
-                                peak_phase_rad : pico t_U en [0, 2*pi)
-                                peak_phase_h   : pico en [0, 24) horas
+                                peak_phase_rad : pico t_U en [0, 2*pi), sin convertir a horas
                                 omega          : asimetria / agudeza
                                 classification : 'day' (t_U in [0, pi))
                                                  o 'night' (t_U in [pi, 2pi))
@@ -265,11 +267,14 @@ def _banner(msg: str) -> None:
 
 
 def _build_atlas(
-    robust_result,
-    top_result,
-    cpca_result,
-    fmm_method:  str,
-    cfg:         dict,
+    method_used:    str,
+    selected_fmm:   pd.DataFrame,
+    top_matrix:     pd.DataFrame,
+    sample_order:   np.ndarray,
+    circular_scale: np.ndarray,
+    lambda_star:    float | None,
+    fmm_method:     str,
+    cfg:            dict,
 ) -> pd.DataFrame:
     """
     Construye la tabla [M^TOP] del atlas circadiano del tejido
@@ -282,31 +287,32 @@ def _build_atlas(
     los K reps producen K orderings de muestras, y se consolida en UN
     orden consenso. Luego se ajusta FMM por gen sobre ese consenso.
 
-    - ``method="best_k"``: [M^TOP] = parametros FMM **de la rep seleccionada**
-      (``robust_result.selected_fmm``), consistentes con su orden de muestras.
-      No se promedia sobre las K (eso mezclaria ordenes ya descartados por
-      peores segun el R² mediano).
-    - ``method="aggregate"``: el orden consenso (TSP3/HODs sobre los K
+    - ``method_used="best_k"``: [M^TOP] = parametros FMM **de la rep
+      seleccionada**, que llegan ya calculados en ``selected_fmm`` y son
+      consistentes con su orden de muestras. No se promedia sobre las K (eso
+      mezclaria ordenes ya descartados por peores segun el R² mediano).
+    - ``method_used="aggregate"``: el orden consenso (TSP3/HODs sobre los K
       orderings de muestras) no coincide con ninguna rep individual, asi
-      que **se re-fittea FMM por gen** sobre el orden consenso para
-      obtener los parametros canonicos.
-    """
-    top_names = list(robust_result.top_gene_names)
+      que **se re-fittea FMM por gen** sobre ``top_matrix`` reordenada por
+      ``sample_order``, usando ``circular_scale`` como escala.
 
-    if robust_result.method_used in ("best_k", "median"):
+    Recibe datos planos y no los objetos de resultado de las etapas, de modo
+    que el atlas se pueda construir a partir de cualquier orden de muestras.
+    """
+    top_names = list(top_matrix.index)
+
+    if method_used in ("best_k", "median"):
         # best_k : parametros de la rep elegida.
         # median : mediana por gen sobre las K (CIRCUST original). En los dos
         #          casos el atlas ya viene calculado en selected_fmm y no hay
         #          nada que re-ajustar.
-        raw = robust_result.selected_fmm[
+        raw = selected_fmm[
             ["gene_name", "r2_fmm", "amplitude", "peak_phase_rad", "omega"]
         ].copy()
     else:
         # Re-fittear FMM sobre el orden consenso de MUESTRAS
-        top_matrix_final = top_result.candidate_matrix.iloc[
-            :, robust_result.sample_order
-        ]
-        final_scale = np.asarray(robust_result.circular_scale, dtype=np.float64)
+        top_matrix_final = top_matrix.iloc[:, sample_order]
+        final_scale = np.asarray(circular_scale, dtype=np.float64)
 
         # El ajuste de cada gen es independiente, asi que se reparte entre
         # procesos igual que en las etapas 3 y 4. Antes era un bucle secuencial
@@ -331,8 +337,8 @@ def _build_atlas(
                 StabilizedFMMModel, prepare_dataset,
             )
             stab_kwargs: dict = {}
-            if cpca_result.lambda_star is not None:
-                stab_kwargs["lambda_star"] = float(cpca_result.lambda_star)
+            if lambda_star is not None:
+                stab_kwargs["lambda_star"] = float(lambda_star)
             prepared   = prepare_dataset(final_scale, **stab_kwargs)
             stab_model = StabilizedFMMModel(prepared=prepared)
             # threading: los workers comparten ``prepared`` en memoria en vez
@@ -350,14 +356,16 @@ def _build_atlas(
             "omega":          [float(f[1]) for f in fits],
         })
 
-    # Postprocesar: pico en horas + clasificacion day/night
-    raw["peak_phase_h"]   = raw["peak_phase_rad"] * 24.0 / (2.0 * np.pi)
+    # Postprocesar: clasificacion day/night. No se convierte peak_phase_rad a
+    # horas: esa conversion asume un periodo de 24h y una correspondencia
+    # directa entre fase circular y hora real del dia que no esta verificada
+    # (mismo motivo por el que sample_order.csv tampoco lleva phase_h).
     raw["classification"] = np.where(
         raw["peak_phase_rad"] < np.pi, "day", "night",
     )
     atlas = raw[[
         "gene_name", "r2_fmm", "amplitude",
-        "peak_phase_rad", "peak_phase_h",
+        "peak_phase_rad",
         "omega", "classification",
     ]].sort_values("r2_fmm", ascending=False).reset_index(drop=True)
     return atlas
@@ -460,7 +468,12 @@ def main() -> None:
         anchor_gene    = cfg["anchor_gene"],
         direction_gene = cfg["direction_gene"],
         verbose        = True,
-    ).run(cpca_result)
+    ).run(
+        expr_ordered   = cpca_result.expr_norm_final,
+        circular_scale = cpca_result.circular_scale,
+        core_genes     = core_genes_found,
+        fmm_fits       = cpca_result.fmm_fits_final,
+    )
     timing["preliminary_order"] = time.perf_counter() - _t
 
     # ─────────────────────────────────────────────────────────────────────
@@ -504,7 +517,6 @@ def main() -> None:
         selection_r2_threshold = args.selection_r2_threshold,
         aggregation_method   = args.aggregation,
         consensus_scale_mode = args.consensus_scale,
-        r2_min               = 0.5,
         anchor_gene          = cfg["anchor_gene"],
         direction_gene       = cfg["direction_gene"],
         fmm_length_alpha_grid= cfg["fmm_alpha_grid"],
@@ -516,7 +528,8 @@ def main() -> None:
         seed                 = args.seed,
         verbose              = True,
     ).run(
-        top_result     = top_result,
+        top_matrix     = top_result.candidate_matrix,
+        theta_pre      = top_result.circular_scale,
         expr_full_norm = order_result.expr_ordered,
         core_genes     = core_genes_found,
     )
@@ -540,11 +553,9 @@ def main() -> None:
         robust_names = [order_result.expr_ordered.columns[i]
                         for i in robust_result.sample_order]
         phases_rad   = np.asarray(robust_result.circular_scale, dtype=np.float64)
-        phases_h     = phases_rad * 24.0 / (2.0 * np.pi)
         pd.DataFrame({
             "sample_name":    robust_names,
             "circular_phase": phases_rad,   # radianes en [0, 2*pi) — canonico
-            "phase_h":        phases_h,     # horas    en [0, 24)  — interpretable
         }).to_csv(output_dir / "sample_order.csv", index=False)
         print(f"    Saved: sample_order.csv  ({len(phases_rad)} muestras)")
 
@@ -558,11 +569,14 @@ def main() -> None:
     # los parametros de la rep seleccionada (en best_k).
     _t = time.perf_counter()
     atlas_df = _build_atlas(
-        robust_result = robust_result,
-        top_result    = top_result,
-        cpca_result   = cpca_result,
-        fmm_method    = args.fmm_method,
-        cfg           = cfg,
+        method_used    = robust_result.method_used,
+        selected_fmm   = robust_result.selected_fmm,
+        top_matrix     = top_result.candidate_matrix,
+        sample_order   = robust_result.sample_order,
+        circular_scale = robust_result.circular_scale,
+        lambda_star    = cpca_result.lambda_star,
+        fmm_method     = args.fmm_method,
+        cfg            = cfg,
     )
     timing["build_atlas"] = time.perf_counter() - _t
     atlas_df.to_csv(output_dir / "circust_atlas.csv", index=False)

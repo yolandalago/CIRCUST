@@ -31,10 +31,8 @@ Paso 2.2 — Verificacion de consistencia biologica:
     ``consistency_pairs``: por cada par ``(g1, g2)`` presente en los genes
     core y con R² >= ``consistency_r2_min`` para ambos, se comprueba si
     peak(g1) < peak(g2). Si mas pares discrepan que coinciden, se invierte;
-    en empate o sin pares validos con evidencia, se mantiene la orientacion
-    del Paso 2.1 (salvo que no haya NINGUN par valido, en cuyo caso se
-    invierte por defecto sin evidencia, igual que el metodo original cuando
-    el gen de consistencia no esta disponible).
+    en empate, o si no hay ningun par valido con evidencia, se mantiene la
+    orientacion del Paso 2.1.
 
     Esto generaliza la tripleta fija original (direction < consistency <
     anchor, un unico par encadenado) a una lista configurable de relaciones
@@ -52,7 +50,6 @@ import pandas as pd
 from dataclasses import dataclass, field
 from math import pi
 
-from circust.cpca import CPCAResult
 from circust.fitting.fmm import FMMModel
 from circust.fitting.rhythm_model import FitResult
 
@@ -220,7 +217,12 @@ class CircularSynchronizer:
     Example
     -------
     >>> syncer = CircularSynchronizer()
-    >>> result = syncer.run(refined)
+    >>> result = syncer.run(
+    ...     expr_ordered   = cpca.expr_norm_final,
+    ...     circular_scale = cpca.circular_scale,
+    ...     core_genes     = cpca.core_genes_found,
+    ...     fmm_fits       = cpca.fmm_fits_final,
+    ... )
     >>> print(result.summary())
     """
 
@@ -247,29 +249,46 @@ class CircularSynchronizer:
 
     def run(
         self,
-        refined: CPCAResult,
+        expr_ordered:   pd.DataFrame,
+        circular_scale: np.ndarray,
+        core_genes:     list[str],
+        fmm_fits:       dict,
     ) -> SynchronizationResult:
         """
         Ejecuta la sincronizacion circular.
 
+        Recibe datos planos y no el resultado de otro paso, de modo que
+        cualquier llamante que disponga de una matriz ordenada, su escala y
+        los ajustes FMM de unos genes core pueda sincronizar, venga esa
+        entrada del CPCA principal o de una submatriz remuestreada como en la
+        Etapa 4.
+
         Parameters
         ----------
-        refined : CPCAResult
-            Salida de ``CPCA.run()``. Los genes core se toman de
-            ``refined.core_genes_found``.
+        expr_ordered : pd.DataFrame (n_genes, n_muestras)
+            Matriz de expresion en el orden circular del paso anterior.
+        circular_scale : np.ndarray (n_muestras,)
+            Fases del orden, alineadas con las columnas de ``expr_ordered``.
+        core_genes : list[str]
+            Genes core **presentes** en ``expr_ordered``, no los solicitados.
+        fmm_fits : dict[str, FitResult]
+            Ajuste FMM de cada gen de ``core_genes``. Los tiempos de pico se
+            derivan de aqui (``fit.peak_time``) en vez de recibirse aparte,
+            que permitiria que ambos quedasen desincronizados.
 
         Returns
         -------
         SynchronizationResult
         """
         self._log("=== Etapa 2: Sincronizacion Circular ===")
-        core_genes = list(refined.core_genes_found)
+        core_genes = list(core_genes)
+        peak_times = {g: fr.peak_time for g, fr in fmm_fits.items()}
 
         # ── Paso 2.1: rotacion + determinacion de direccion ───────────────
         self._log("  Paso 2.1 — rotando al marco de referencia ...")
         (o_pre, esc_pre, mat_pre, peaks_pre, r2_fmm, par_pre,
          names_day, names_night, reversed_21) = self._pre_order(
-            refined, core_genes
+            expr_ordered, circular_scale, fmm_fits, peak_times, core_genes
         )
 
         # ── Paso 2.2: verificacion de consistencia biologica ──────────────
@@ -301,7 +320,10 @@ class CircularSynchronizer:
             pre_direction_reversed = reversed_21,
         )
 
-        self._log(result.summary())
+        # El resumen se construye solo si se va a imprimir: la Etapa 4 llama
+        # aqui una vez por repeticion y por reintento.
+        if self.verbose:
+            self._log(result.summary())
         return result
 
     # ------------------------------------------------------------------
@@ -310,8 +332,11 @@ class CircularSynchronizer:
 
     def _pre_order(
         self,
-        refined:    CPCAResult,
-        core_genes: list[str],
+        expr_ordered:   pd.DataFrame,
+        circular_scale: np.ndarray,
+        fmm_fits:       dict,
+        peak_times_fin: dict,
+        core_genes:     list[str],
     ) -> tuple:
         """
         Returns
@@ -326,11 +351,6 @@ class CircularSynchronizer:
         names_night : list[str]   — genes con pico en [π, 2π)
         reversed    : bool        — True si la direccion se invirtio
         """
-        circular_scale = refined.circular_scale
-        expr_ordered   = refined.expr_norm_final
-        fmm_fits       = refined.fmm_fits_final
-        peak_times_fin = refined.fmm_peak_times_final
-
         n_core = len(core_genes)
 
         # ── R² de ajustes FMM con ordenamiento final ──────────────────────
@@ -480,19 +500,21 @@ class CircularSynchronizer:
                     f"pares de orden a priori se cumplen."
                 )
             else:
-                # Sin ningun par valido (genes ausentes o mal ajustados) la
-                # orientacion se invierte por defecto. Se avisa porque es una
-                # decision tomada sin evidencia: ocurre, por ejemplo, con el
+                # Sin ningun par valido (genes ausentes o mal ajustados) no
+                # hay evidencia a priori con la que decidir, asi que se
+                # mantiene la orientacion que ya establecio el Paso 2.1 en
+                # vez de invertir a ciegas. Ocurre, por ejemplo, con el
                 # conjunto core de Ruben et al. (2018), que incluye CRY2 pero
-                # no CRY1.
+                # no CRY1, o cuando ninguno de los dos genes de un par cayo
+                # en el subconjunto muestreado de una repeticion de la Etapa 4.
                 self._log(
                     f"  AVISO: se ha producido una situacion de aviso sobre "
                     f"la orientacion y ningun par de consistency_pairs esta "
                     f"disponible/bien ajustado (R2 >= {self.consistency_r2_min}) "
-                    f"entre los genes core. La orientacion se invierte por "
-                    f"defecto, sin verificar ninguna relacion de fases."
+                    f"entre los genes core. Se mantiene la orientacion del "
+                    f"Paso 2.1, sin verificar ninguna relacion de fases."
                 )
-                flip = True
+                flip = False
         else:
             flip = False
 

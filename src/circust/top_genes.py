@@ -320,10 +320,11 @@ class TopGeneResult:
         en ``RandomSelector``.
 
     coverage_genes : list[str]
-        Genes incorporados unicamente para que ningun sector circular quedase
-        vacio, con el umbral de R2_FMM relajado. Se excluyen tambien del pool
-        de muestreo aleatorio: al no alcanzar el R2 minimo harian fallar el
-        criterio de calidad de la etapa 5 en cuanto entrasen en una extraccion.
+        Siempre vacio: la regla de cobertura ya no fuerza ningun gen que no
+        supere ``omega_min``/``r2_fmm_threshold`` (ver docstring de
+        ``_select_top_indices``). Se mantiene el campo por compatibilidad
+        con ``RandomSelector``, que lo excluye del pool de muestreo si
+        alguna vez volviera a poblarse.
 
     sample_order : np.ndarray int (n_muestras,)
         Orden de muestras del sincronizado preliminar.
@@ -432,9 +433,10 @@ class TopGeneSelector:
     n_sectors : int
         Numero de sectores circulares en los que se divide la circunferencia,
         con origen en la mediana circular de los picos. Cumplen dos funciones:
-        garantizar cobertura uniforme (ningun sector vacio; si lo esta se
-        rellena con el gen de mayor R2_FMM de ese sector entre los que cumplen
-        omega > omega_min) y estratificar el cupo de ``target_size``.
+        detectar sectores sin ningun gen ritmico (se avisa por consola, no se
+        rellena con un gen que no supere omega_min/r2_fmm_threshold, ver
+        docstring de ``_select_top_indices``) y estratificar el cupo de
+        ``target_size``.
 
         El texto principal del paper exige cubrir los cuatro cuadrantes, de
         modo que 4 es el minimo admisible; el esquema del suplementario habla
@@ -564,7 +566,14 @@ class TopGeneSelector:
         -------
         TopGeneResult
         """
-        seed_genes = list(seed_genes)
+        # dict.fromkeys en vez de set(): preserva el orden y evita que un
+        # gen semilla duplicado (p.ej. --core-genes con un nombre repetido)
+        # se fuerce dos veces mas abajo, duplicando su fila en acc_names.
+        # Con set() el orden cambia en cada proceso, porque el hash de las
+        # cadenas esta aleatorizado, y eso reordena las filas del conjunto TOP.
+        # La Etapa 4 muestrea por indice sobre ese conjunto, de modo que la
+        # misma semilla acababa eligiendo genes distintos en cada ejecucion.
+        seed_genes = list(dict.fromkeys(seed_genes))
         self._log("=== Etapa 3: Seleccion de Genes TOP ===")
 
         gene_names = list(expr_norm.index)
@@ -658,12 +667,14 @@ class TopGeneSelector:
         # Los tres criterios que definen el conjunto TOP son: R2_FMM alto,
         # perfil no spiked (omega > 0.1) y picos t_U que cubren de forma
         # aproximadamente uniforme la circunferencia. Los dos primeros son los
-        # filtros anteriores; el tercero se impone aqui dividiendo el circulo en
-        # ``n_sectors`` sectores con origen en la mediana circular de los picos
-        # estimados y exigiendo que ninguno quede vacio. El cupo
-        # ``target_size`` se reparte despues entre esos sectores, tomando en
-        # cada uno los de mayor R2_FMM, para no romper la cobertura recien
-        # impuesta.
+        # filtros anteriores; el tercero se comprueba aqui dividiendo el
+        # circulo en ``n_sectors`` sectores con origen en la mediana circular
+        # de los picos estimados. Si un sector queda vacio se avisa, pero no
+        # se fuerza ningun gen que no supere ya los dos primeros criterios
+        # (comprobado con datos reales: rellenar con R2<r2_fmm_threshold
+        # mete en el TOP genes que el propio filtro ya habia rechazado). El
+        # cupo ``target_size`` se reparte despues entre los sectores que si
+        # tienen genes, tomando en cada uno los de mayor R2_FMM.
         sel_idx, cov_idx = self._select_top_indices(
             fmm_peaks_all, fmm_omega_all, fmm_r2_all, mask_fmm,
         )
@@ -810,11 +821,16 @@ class TopGeneSelector:
         1. **Cobertura circular.** Se divide la circunferencia en
            ``n_sectors`` sectores tomando como origen la mediana circular de
            los picos ``t_U`` de los genes filtrados. Si algun sector queda
-           vacio, se rellena con el gen de mayor ``R2_FMM`` cuyo pico caiga en
-           el, entre los que cumplen ``omega > omega_min``. Es decir, se relaja
-           unicamente el umbral de ``R2_FMM``, nunca el criterio de perfil no
-           spiked. Un sector solo puede quedar vacio si ningun gen ritmico tiene
-           su pico en el, situacion que se avisa por consola.
+           vacio se avisa por consola, pero **no se rellena con ningun gen
+           que no supere ya ``omega_min`` Y ``r2_fmm_threshold``** (es decir,
+           que no pertenezca a ``mask_fmm``): comprobado con datos reales
+           (cerebro humano post mortem, GSE71620/BA11), relajar el umbral de
+           R2_FMM para rellenar huecos metia en el conjunto TOP genes con
+           R2 tan bajo como 0.37, por debajo del propio umbral de calidad
+           que exige la Seccion 3. Si el tejido genuinamente no tiene ningun
+           gen ritmico con pico en un sector, el sector queda sin cubrir en
+           vez de maquillarlo con un ajuste que el propio criterio de
+           calidad ya ha rechazado.
 
         2. **Cupo por sector.** Si ``target_size`` no es None, se retienen como
            mucho ``target_size`` genes: el cupo se reparte a partes iguales
@@ -825,27 +841,22 @@ class TopGeneSelector:
            siempre que haya genes suficientes.
 
            El reparto por sectores, y no un ranking global, evita que el cupo
-           deshaga la cobertura que acaba de imponerse: un ranking global por
-           ``R2_FMM`` tiende a concentrarse en la region del ciclo donde la
-           señal es mas fuerte.
-
-           Los genes incorporados por la regla de cobertura del paso 1 tienen
-           plaza garantizada: son el unico gen de su sector y descartarlos
-           dejaria un hueco en la circunferencia.
+           deshaga la cobertura ya presente de forma natural: un ranking
+           global por ``R2_FMM`` tiende a concentrarse en la region del ciclo
+           donde la señal es mas fuerte.
 
         Returns
         -------
         np.ndarray de int : indices (sobre los supervivientes del filtro ORI)
-        que forman el conjunto TOP, en orden creciente, y los indices de los
-        genes que han entrado unicamente por la regla de cobertura, que se
-        excluyen despues del muestreo aleatorio de la etapa 5 por haber
-        entrado con el umbral de R2 relajado.
+        que forman el conjunto TOP, en orden creciente, y un array vacio
+        (se mantiene por compatibilidad con el resto del pipeline, que ya
+        no recibe genes de cobertura: nunca se fuerza ninguno).
         """
         sel = np.flatnonzero(mask_fmm)
-        cov: list[int] = []
+        cov: np.ndarray = np.array([], dtype=int)
         if sel.size == 0:
             self._log("  AVISO: ningun gen supera los filtros FMM.")
-            return sel, np.array([], dtype=int)
+            return sel, cov
 
         n_sec = self.n_sectors
 
@@ -853,31 +864,18 @@ class TopGeneSelector:
         peak_ref = circular_median(peaks[sel])
         sectors  = assign_sectors(peaks, peak_ref, n_sec)
 
-        # ── 1. Cobertura: ningun sector puede quedar vacio ────────────────
-        keep = set(sel.tolist())
-        pool = np.flatnonzero(omega > self.omega_min)     # se relaja solo R2_FMM
+        # ── 1. Cobertura: se registra si algun sector queda vacio, sin ────
+        # forzar ningun gen que no supere ya omega Y R2_FMM (ver docstring).
         for s in range(1, n_sec + 1):
-            if np.any(sectors[sel] == s):
-                continue
-            cand = pool[sectors[pool] == s]
-            if cand.size == 0:
+            if not np.any(sectors[sel] == s):
                 self._log(
                     f"  AVISO: el sector {s} no contiene ningun gen con "
-                    f"omega>{self.omega_min}; no puede cubrirse."
+                    f"omega>{self.omega_min} y R2_FMM>={self.r2_fmm_threshold}; "
+                    "queda sin cobertura."
                 )
-                continue
-            best = int(cand[int(np.argmax(r2_fmm[cand]))])
-            keep.add(best)
-            cov.append(best)
-            self._log(
-                f"  Cobertura: sector {s} vacio, se incorpora el gen de mayor "
-                f"R2_FMM del sector (R2={r2_fmm[best]:.3f}, "
-                f"omega={omega[best]:.3f})"
-            )
-        sel = np.array(sorted(keep), dtype=int)
 
         # ── 2. Cupo absoluto, estratificado por sector ────────────────────
-        cov_arr = np.array(sorted(cov), dtype=int)
+        cov_arr = cov
         if self.target_size is None or self.target_size >= sel.size:
             return sel, cov_arr
 

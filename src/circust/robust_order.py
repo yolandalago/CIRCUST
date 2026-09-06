@@ -7,9 +7,9 @@ Pipeline en dos fases:
 
   **Fase A — Etapa comun** (no cambia entre metodos):
       1. Genera K subconjuntos aleatorios de genes TOP (tamano configurable,
-         por defecto 2/3 del total), excluidos los genes semilla forzados y
-         los anadidos por cobertura de sector, con la unica restriccion de
-         calidad minima R2 > r2_min.
+         por defecto 2/3 del total), muestreados sobre el conjunto TOP
+         completo: los genes TOP ya superaron los filtros de calidad de la
+         etapa 3, forzados o no, asi que ninguno se excluye del muestreo.
       2. Para cada subconjunto k=1..K ejecuta:
          a) CPCA sobre la submatriz de genes seleccionada.
          b) Sincronizacion biologica (rotacion + orientacion).
@@ -45,7 +45,6 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from math import pi
-from types import SimpleNamespace
 
 from circust.circular_aggregation import (
     aggregate_circular_orders, circular_isotonic_regression,
@@ -53,7 +52,7 @@ from circust.circular_aggregation import (
 from circust.cpca                 import CPCA
 from circust.fitting.fmm          import FMMModel
 from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
-from circust.synchronizer        import CircularSynchronizer
+from circust.synchronizer        import CircularSynchronizer, DEFAULT_CONSISTENCY_PAIRS
 # top_genes solo depende de circust.fitting, asi que no hay ciclo.
 from circust.top_genes           import circular_median
 
@@ -61,6 +60,11 @@ from circust.top_genes           import circular_median
 # ===========================================================================
 # Helpers a nivel de modulo (serializables por pickle, reutilizables)
 # ===========================================================================
+
+# Tope de seguridad de remuestreos por repeticion (Fase A.2) cuando ninguna
+# submuestra de genes produce un orden circular legitimo. Provisional, sin
+# calibrar en el estudio de simulacion.
+_MAX_LEGITIMACY_ATTEMPTS = 50
 
 def _fit_gene(args):
     """Ajusta FMM para un unico gen en una repeticion.
@@ -152,6 +156,25 @@ def _circular_correlation(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sum(sa * sb) / den)
 
 
+def _max_circular_gap(theta: np.ndarray) -> float:
+    """Mayor hueco angular entre valores consecutivos de ``theta`` (radianes).
+
+    Ordena los angulos y calcula las diferencias consecutivas, incluyendo el
+    hueco de cierre del circulo (del ultimo valor de vuelta al primero, mas
+    ``2*pi``). Es la base de las dos condiciones de legitimidad de un orden
+    circular candidato que exige la Fase A.2 (ver ``_run_repetitions``):
+    cobertura de mas de media circunferencia (hueco maximo < pi) y hueco
+    maximo no mayor que el del orden preliminar de referencia.
+    """
+    two_pi = 2.0 * np.pi
+    theta_sorted = np.sort(np.asarray(theta, dtype=np.float64) % two_pi)
+    if theta_sorted.size < 2:
+        return 0.0
+    gaps = np.diff(theta_sorted)
+    wrap = theta_sorted[0] + two_pi - theta_sorted[-1]
+    return float(max(gaps.max(), wrap))
+
+
 def _circular_mean_consensus(
     Theta: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -224,8 +247,6 @@ class RobustOrderResult:
     Atributos -- seleccion aleatoria
     --------------------------------
     selection_names : np.ndarray object, shape (K, tam)
-    pool_size : int
-    n_excluded : int
     top_gene_names : list[str]
     """
 
@@ -250,8 +271,6 @@ class RobustOrderResult:
 
     # ── Seleccion aleatoria ──────────────────────────────────────────────
     selection_names: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=object))
-    pool_size:       int        = 0
-    n_excluded:      int        = 0
     top_gene_names:  list       = field(default_factory=list)
     # Atlas de best_k (Larriba 2023, Step 4): parametros FMM de la REPETICION
     # SELECCIONADA (sel_rep), consistentes con el orden que se devuelve.
@@ -309,8 +328,6 @@ class RobustOrderResult:
                 f"  Mediana R² por rep       : "
                 f"{np.round(self.median_r2_per_rep, 4).tolist()}"
             )
-        lines.append(f"  Genes muestreables       : {self.pool_size}")
-        lines.append(f"  Genes retirados del pool : {self.n_excluded}")
         return "\n".join(lines)
 
 
@@ -368,8 +385,6 @@ class RobustOrderEstimator:
           consenso. Verifica ``phi_{o_1} <= ... <= phi_{o_n}`` por construccion,
           como pide el anexo, pero agrupa muestras en bloques y en simulacion
           multiplica por 2 a 5 el error mediano de fase.
-    r2_min : float
-        R² parametrico minimo en cada extraccion. Por defecto 0.5.
     anchor_gene, direction_gene : str
         Genes ancla para sincronizacion.
     consistency_pairs : list[tuple[str, str]] | None
@@ -403,7 +418,6 @@ class RobustOrderEstimator:
         selection_r2_threshold: float = 0.65,
         aggregation_method:    str   = "auto",
         consensus_scale_mode:  str   = "circmean",
-        r2_min:                float = 0.5,
         anchor_gene:           str   = "ARNTL",
         direction_gene:        str   = "DBP",
         consistency_pairs:     list[tuple[str, str]] | None = None,
@@ -445,7 +459,6 @@ class RobustOrderEstimator:
         self.selection_r2_threshold = selection_r2_threshold
         self.aggregation_method   = aggregation_method
         self.consensus_scale_mode = consensus_scale_mode
-        self.r2_min               = r2_min
         self.anchor_gene          = anchor_gene
         self.direction_gene       = direction_gene
         self.consistency_pairs    = consistency_pairs
@@ -468,7 +481,8 @@ class RobustOrderEstimator:
 
     def run(
         self,
-        top_result,
+        top_matrix:     pd.DataFrame,
+        theta_pre:      np.ndarray,
         expr_full_norm: pd.DataFrame,
         core_genes:     list[str],
         eval_genes:     list[str] | None = None,
@@ -477,12 +491,18 @@ class RobustOrderEstimator:
 
         Parameters
         ----------
-        top_result : TopGeneResult
-            Salida de ``TopGeneSelector.run()``.
+        top_matrix : pd.DataFrame (n_top, n_muestras)
+            Matriz de los genes TOP, en el orden circular preliminar. Sus
+            indices de fila son el conjunto TOP sobre el que se muestrea.
+        theta_pre : np.ndarray (n_muestras,)
+            Escala circular preliminar. Sirve de referencia en tres puntos:
+            la condicion de legitimidad de A.2, la correccion de
+            orientaciones de A.2b y el contraste del consenso de la opcion A.
         expr_full_norm : pd.DataFrame (n_genes, n_muestras)
-            Matriz normalizada completa, en el orden circular preliminar.
+            Matriz normalizada completa, en el orden circular preliminar. De
+            aqui se extraen las filas de cada submuestra para su CPCA.
         core_genes : list[str]
-            Genes reloj centrales.
+            Genes reloj centrales, usados para sincronizar cada repeticion.
         eval_genes : list[str] | None
             Genes sobre los que se evaluan los criterios de seleccion.
             Default: el conjunto TOP completo.
@@ -493,7 +513,6 @@ class RobustOrderEstimator:
         if self.method == "aggregate":
             self._log(f"  Agregacion: {self.aggregation_method}")
 
-        top_matrix = top_result.candidate_matrix
         names_top  = list(top_matrix.index)
         n_top      = len(names_top)
         n_samp     = top_matrix.shape[1]
@@ -511,23 +530,22 @@ class RobustOrderEstimator:
         self._log(f"  Genes de evaluacion: {len(eval_genes)}")
 
         # ── Fase A.1: Seleccion aleatoria ───────────────────────────────
-        sel_names, pool_size, n_excluded = self._random_selection(
-            top_result, expr_full_norm,
-        )
-        K = sel_names.shape[0]
+        rng, tam = self._random_selection(names_top)
+        K = self.n_reps
+        theta_pre = np.asarray(theta_pre, dtype=np.float64)
 
         # ── Fase A.2: CPCA + Sincronizacion + ajustes por rep ─────────
         (sample_orders, circ_scales, flipped_arr,
-         stats_table, per_rep_fmm) = \
+         stats_table, per_rep_fmm, sel_names) = \
             self._run_repetitions(
-                sel_names, top_matrix, expr_full_norm,
-                core_genes, names_top, n_top, n_samp, K,
+                rng, tam, top_matrix, expr_full_norm,
+                core_genes, names_top, n_top, n_samp, K, theta_pre,
             )
 
         # ── Fase A.2b: correccion de orientaciones ────────────────────
         sample_orders, circ_scales = self._fix_orientations(
             sample_orders, circ_scales,
-            theta_pre = np.asarray(top_result.circular_scale, dtype=np.float64),
+            theta_pre = theta_pre,
             n_samp    = n_samp,
         )
 
@@ -571,8 +589,6 @@ class RobustOrderEstimator:
                 median_r2_per_rep  = median_r2,
                 n_well_fitted_per_rep = n_well_fitted,
                 selection_names    = sel_names,
-                pool_size          = pool_size,
-                n_excluded         = n_excluded,
                 top_gene_names     = names_top,
                 selected_fmm       = self._median_fmm_atlas(
                     stats_table, names_top, K, n_top,
@@ -596,7 +612,7 @@ class RobustOrderEstimator:
                 sample_orders, circ_scales,
                 best_order = final_order,
                 best_scale = final_scale,
-                theta_pre  = np.asarray(top_result.circular_scale, dtype=np.float64),
+                theta_pre  = theta_pre,
                 n_samp     = n_samp,
             )
             return RobustOrderResult(
@@ -615,8 +631,6 @@ class RobustOrderEstimator:
                 median_r2_per_rep  = median_r2,
                 n_well_fitted_per_rep = n_well_fitted,
                 selection_names    = sel_names,
-                pool_size          = pool_size,
-                n_excluded         = n_excluded,
                 top_gene_names     = names_top,
                 selected_fmm       = selected_fmm,
                 **circ_extra,
@@ -643,8 +657,6 @@ class RobustOrderEstimator:
                 median_r2_per_rep  = median_r2,
                 n_well_fitted_per_rep = n_well_fitted,
                 selection_names    = sel_names,
-                pool_size          = pool_size,
-                n_excluded         = n_excluded,
                 top_gene_names     = names_top,
             )
 
@@ -654,87 +666,39 @@ class RobustOrderEstimator:
 
     def _random_selection(
         self,
-        top_result,
-        expr_full_norm: pd.DataFrame,
-    ) -> tuple[np.ndarray, int, int]:
-        """Genera las K extracciones aleatorias del conjunto TOP.
+        names_top: list[str],
+    ) -> tuple[np.random.Generator, int]:
+        """Prepara el generador aleatorio y el tamano de cada submuestra.
 
-        Del conjunto del que se muestrea se retiran tres grupos de genes.
+        Se muestrea sobre el conjunto TOP completo, sin excluir ningun gen:
+        los genes TOP (forzados como semilla o no) ya superaron los filtros de
+        calidad de la etapa 3, asi que se consideran igualmente validos para
+        entrar en la submatriz de cada repeticion.
 
-        Los genes semilla forzados, que entraron en el conjunto TOP por
-        pertenecer al conjunto \textit{core} y no por superar los filtros. Los
-        genes incorporados para que ningun sector circular quedase vacio, que
-        entraron con el umbral de R2 relajado. Y los que no superan ``r2_min``,
-        con la excepcion del gen ancla y el de direccion, que es la restriccion
-        de calidad minima que figura entre los parametros configurables de esta
-        etapa.
-
-        Sobre el conjunto resultante se extraen sin reemplazo ``K`` subconjuntos
-        de tamano ``sample_size_fraction`` del total.
-
-        Por que se filtra el conjunto en vez de rechazar extracciones
-        ------------------------------------------------------------
-        La implementacion original comprobaba la calidad minima sobre cada
-        extraccion ya realizada y, si algun gen no la superaba, la descartaba y
-        volvia a extraer hasta un numero maximo de intentos. Ese esquema no
-        puede funcionar: la condicion exige que **todos** los genes extraidos
-        superen el umbral, y como cada extraccion toma dos tercios del conjunto,
-        la probabilidad de que un gen concreto quede fuera es un tercio. Si
-        existe algun gen por debajo del umbral, la mayoria de las extracciones
-        lo incluiran y repetir no cambia el problema, solo lo hace mas lento.
-        Filtrar una unica vez el conjunto garantiza la condicion por
-        construccion, sin reintentos y de forma determinista.
+        El sorteo en si de cada subconjunto de tamano ``tam`` ocurre dentro de
+        :meth:`_run_repetitions`, porque una submuestra puede tener que
+        redibujarse si el orden circular que produce no resulta legitimo (ver
+        el docstring de ese metodo).
 
         Returns
         -------
-        (sel_names, n_pool, n_excluded)
-            ``sel_names`` de forma (K, tam), el tamano del conjunto del que se
-            muestrea y el numero de genes retirados.
+        (rng, tam)
         """
         self._log("  --- Seleccion aleatoria ---")
 
         rng = np.random.default_rng(self.seed)
 
-        names = np.asarray(top_result.gene_names, dtype=object)
-        r2    = np.asarray(top_result.r2_par,     dtype=np.float64)
-
-        # Genes que no participan del muestreo
-        excluidos = set(top_result.added_genes) | set(
-            getattr(top_result, "coverage_genes", []) or []
-        )
-        keep = np.array([bool(n not in excluidos) for n in names], dtype=bool)
-        n_forzados = int((~keep).sum())
-
-        # Calidad minima, con la excepcion del ancla y el gen de direccion
-        exentos = (self.anchor_gene, self.direction_gene)
-        bajo_r2 = (r2 <= self.r2_min) & np.array(
-            [bool(n not in exentos) for n in names], dtype=bool
-        )
-        n_bajo_r2 = int((keep & bajo_r2).sum())
-        keep &= ~bajo_r2
-
-        names_pool = names[keep]
-        n_pool = len(names_pool)
-        if n_pool < 2:
+        n_top = len(names_top)
+        if n_top < 2:
             raise ValueError(
-                f"Quedan {n_pool} genes tras filtrar el conjunto TOP "
-                f"(forzados o de cobertura: {n_forzados}, "
-                f"por R2 <= {self.r2_min}: {n_bajo_r2}). Se necesitan al menos 2."
+                f"El conjunto TOP tiene {n_top} genes; se necesitan al menos 2."
             )
 
-        tam = max(1, min(n_pool, int(np.ceil(self.sample_size_fraction * n_pool))))
+        tam = max(1, min(n_top, int(np.ceil(self.sample_size_fraction * n_top))))
 
-        self._log(
-            f"    Pool: {n_pool} genes  |  retirados: {n_forzados} forzados o de "
-            f"cobertura, {n_bajo_r2} con R2 <= {self.r2_min}  |  tam={tam}  |  "
-            f"K={self.n_reps}"
-        )
+        self._log(f"    Genes TOP: {n_top}  |  tam={tam}  |  K={self.n_reps}")
 
-        sel_names = np.empty((self.n_reps, tam), dtype=object)
-        for k in range(self.n_reps):
-            sel_names[k] = names_pool[rng.choice(n_pool, size=tam, replace=False)]
-
-        return sel_names, n_pool, n_forzados + n_bajo_r2
+        return rng, tam
 
     # ==================================================================
     # Fase A.2 — CPCA + Sincronizacion por repeticion
@@ -742,7 +706,8 @@ class RobustOrderEstimator:
 
     def _run_repetitions(
         self,
-        sel_names:      np.ndarray,
+        rng:            np.random.Generator,
+        tam:            int,
         top_matrix:     pd.DataFrame,
         expr_full_norm: pd.DataFrame,
         core_genes:     list[str],
@@ -750,114 +715,178 @@ class RobustOrderEstimator:
         n_top:          int,
         n_samp:         int,
         K:              int,
+        theta_pre:      np.ndarray,
     ) -> tuple:
-        """Por cada rep: CPCA(submatriz) + Synchronizer + ajuste FMM.
+        """Por cada rep: sorteo de genes + CPCA(submatriz) + Synchronizer +
+        ajuste FMM.
 
         Las muestras se preservan: el CPCA interno NO elimina outliers
         adicionales (``max_outlier_fraction=0``) — los outliers ya se quitaron
         en el CPCA principal del pipeline. Esto preserva ``n_samp`` constante
         en todas las reps.
+
+        Legitimidad del orden circular candidato
+        -----------------------------------------
+        Tras sincronizar cada repeticion se obtiene ``esc_fin``, la escala
+        circular de esa repeticion. Se exige que sea "legitima":
+
+          (a) sus valores cubren mas de media circunferencia, es decir, el
+              hueco angular maximo entre dos valores consecutivos es < pi;
+          (b) ese hueco maximo no es mayor que el del orden preliminar de
+              referencia (``theta_pre``, la escala de la Etapa 2).
+
+        Si el subconjunto de genes sorteado para una repeticion produce una
+        ``esc_fin`` que no cumple (a) y (b), se descarta y se vuelve a
+        sortear un nuevo subconjunto de genes para esa misma repeticion,
+        hasta ``_MAX_LEGITIMACY_ATTEMPTS`` intentos. Si se agota el limite sin
+        exito, se registra un aviso y se sigue adelante con el ultimo intento
+        en vez de interrumpir el pipeline completo por una unica repeticion
+        problematica. Solo se aplica aqui, en la seleccion de las K
+        ordenaciones de esta etapa, no al orden preliminar de la Etapa 2.
         """
         self._log("  --- Ejecutando repeticiones ---")
 
         # FMM "base" para core genes dentro de la sincronizacion previa
         # (en stab se reasigna por rep porque depende de la escala k)
         fmm = FMMModel(**self._fmm_kwargs) if self.fmm_method == "base" else None
-        prelim = CircularSynchronizer(
-            anchor_gene       = self.anchor_gene,
-            direction_gene    = self.direction_gene,
-            consistency_pairs = self.consistency_pairs,
-            verbose           = False,
+
+        # Pares de consistencia a priori (Paso 2.2), resueltos una vez. Por
+        # repeticion/intento se filtran a los que caigan dentro de ``genes_k``
+        # (el subconjunto TOP sorteado para esa CPCA): un par cuyos dos genes
+        # no estan en el muestreo de esa repeticion no aporta evidencia sobre
+        # el orden que ese muestreo en concreto ha producido, y usarlo de
+        # todas formas sesgaria por igual las K repeticiones en la misma
+        # direccion, anulando la diversidad que el muestreo aleatorio busca.
+        pairs_all = (
+            list(self.consistency_pairs) if self.consistency_pairs is not None
+            else list(DEFAULT_CONSISTENCY_PAIRS)
         )
+
+        names_top_arr = np.asarray(names_top, dtype=object)
+        theta_pre = np.asarray(theta_pre, dtype=np.float64)
+        max_gap_pre = _max_circular_gap(theta_pre) if theta_pre.size == n_samp else None
+        if max_gap_pre is None:
+            self._log(
+                "  [legitimidad] sin escala preliminar valida; solo se exige "
+                "cobertura de mas de media circunferencia."
+            )
 
         sample_orders = np.zeros((K, n_samp), dtype=int)
         circ_scales   = np.zeros((K, n_samp), dtype=np.float64)
         flipped_arr   = np.zeros(K, dtype=bool)
         stats_table   = np.zeros((K * n_top, 12), dtype=np.float64)
         per_rep_fmm   = []
+        sel_names     = np.empty((K, tam), dtype=object)
 
         for k in range(K):
             self._log(f"    --- Repeticion {k+1}/{K} ---")
-            genes_k = [
-                g for g in sel_names[k].tolist()
-                if g is not None and g in expr_full_norm.index
-            ]
-            if len(genes_k) < 2:
-                raise ValueError(
-                    f"Repeticion {k}: menos de 2 genes disponibles para CPCA. "
-                    f"sel_names[{k}] = {sel_names[k].tolist()}"
+
+            attempt = 0
+            while True:
+                attempt += 1
+                genes_k_arr = names_top_arr[rng.choice(n_top, size=tam, replace=False)]
+                genes_k = [
+                    g for g in genes_k_arr.tolist()
+                    if g is not None and g in expr_full_norm.index
+                ]
+                if len(genes_k) < 2:
+                    raise ValueError(
+                        f"Repeticion {k}: menos de 2 genes disponibles para "
+                        f"CPCA. genes_k = {genes_k}"
+                    )
+
+                genes_k_set = set(genes_k)
+                pairs_k = [
+                    (a, b) for (a, b) in pairs_all
+                    if a in genes_k_set and b in genes_k_set
+                ]
+                prelim = CircularSynchronizer(
+                    anchor_gene       = self.anchor_gene,
+                    direction_gene    = self.direction_gene,
+                    consistency_pairs = pairs_k,
+                    verbose           = False,
                 )
 
-            # ── 1. CPCA sobre submatriz seleccionada ────────────────────
-            # max_outlier_fraction=0: NO elimina muestras adicionales (los
-            # outliers ya se quitaron en el CPCA principal del pipeline).
-            cpca_stab_kwargs = dict(self.fmm_stab_kwargs)
-            if (self.fmm_method == "stabilized"
-                    and not self.recalibrate_lambda_per_rep
-                    and self.lambda_star_inherited is not None
-                    and "lambda_star" not in cpca_stab_kwargs):
-                cpca_stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
-
-            sub_df = expr_full_norm.loc[genes_k]
-            cpca_k = CPCA(
-                core_genes           = genes_k,
-                max_outlier_fraction = 0.0,
-                fmm_method           = self.fmm_method,
-                fmm_stab_kwargs      = cpca_stab_kwargs,
-                compute_fmm_fits     = False,  # solo se usan sample_order/circular_scale
-                verbose              = False,
-            ).run(sub_df)
-            order_k = cpca_k.sample_order
-            esc_k   = cpca_k.circular_scale
-
-            # ── 2. Reordenar la matriz TOP ──────────────────────────────
-            # ``iloc`` preserva los nombres originales de muestra; no
-            # reseteamos columnas para que la salida final emparejada por
-            # nombre sea posible aguas arriba.
-            top_k = top_matrix.iloc[:, order_k].copy()
-
-            # ── 3. Construir modelo FMM y ajustar core genes para sync ──
-            if self.fmm_method == "stabilized":
-                stab_kwargs = dict(self.fmm_stab_kwargs)
-                if (not self.recalibrate_lambda_per_rep
+                # ── 1. CPCA sobre submatriz seleccionada ────────────────
+                # max_outlier_fraction=0: NO elimina muestras adicionales
+                # (los outliers ya se quitaron en el CPCA principal).
+                cpca_stab_kwargs = dict(self.fmm_stab_kwargs)
+                if (self.fmm_method == "stabilized"
+                        and not self.recalibrate_lambda_per_rep
                         and self.lambda_star_inherited is not None
-                        and "lambda_star" not in stab_kwargs):
-                    stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
-                prepared_k = prepare_dataset(esc_k, **stab_kwargs)
-                fmm = StabilizedFMMModel(prepared=prepared_k)
+                        and "lambda_star" not in cpca_stab_kwargs):
+                    cpca_stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
 
-            core_present = [g for g in core_genes if g in top_k.index]
-            fmm_fits   = {}
-            peak_times = {}
-            for g in core_present:
-                fr = fmm.fit(top_k.loc[g].values.astype(np.float64), esc_k)
-                fmm_fits[g]   = fr
-                peak_times[g] = fr.peak_time
+                sub_df = expr_full_norm.loc[genes_k]
+                cpca_k = CPCA(
+                    core_genes           = genes_k,
+                    max_outlier_fraction = 0.0,
+                    fmm_method           = self.fmm_method,
+                    fmm_stab_kwargs      = cpca_stab_kwargs,
+                    compute_fmm_fits     = False,  # solo se usan sample_order/circular_scale
+                    verbose              = False,
+                ).run(sub_df)
+                order_k = cpca_k.sample_order
+                esc_k   = cpca_k.circular_scale
 
-            # Namespace para CircularSynchronizer (espera CPCAResult-like)
-            fake_refined = SimpleNamespace(
-                cpca_final           = SimpleNamespace(circular_scale=esc_k),
-                circular_scale       = esc_k,
-                expr_norm_final      = top_k,
-                fmm_fits_final       = fmm_fits,
-                fmm_peak_times_final = peak_times,
-            )
+                # ── 2. Reordenar la matriz TOP ──────────────────────────
+                # ``iloc`` preserva los nombres originales de muestra; no
+                # reseteamos columnas para que la salida final emparejada
+                # por nombre sea posible aguas arriba.
+                top_k = top_matrix.iloc[:, order_k].copy()
 
-            (o_pre, esc_pre, mat_pre, peaks_pre, r2_fmm, par_pre,
-             names_day, names_night, reversed_21) = prelim._pre_order(
-                fake_refined, core_present
-            )
-            (o_fin, esc_fin, mat_fin, peaks_fin,
-             pars_fin, flipped_22, _ind) = prelim._basic_order(
-                o_pre, esc_pre, mat_pre, peaks_pre, par_pre, core_present
-            )
-            orientation_changed = bool(reversed_21 != flipped_22)
+                # ── 3. Construir modelo FMM y ajustar core genes ────────
+                if self.fmm_method == "stabilized":
+                    stab_kwargs = dict(self.fmm_stab_kwargs)
+                    if (not self.recalibrate_lambda_per_rep
+                            and self.lambda_star_inherited is not None
+                            and "lambda_star" not in stab_kwargs):
+                        stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
+                    prepared_k = prepare_dataset(esc_k, **stab_kwargs)
+                    fmm = StabilizedFMMModel(prepared=prepared_k)
+
+                core_present = [g for g in core_genes if g in top_k.index]
+                fmm_fits = {}
+                for g in core_present:
+                    fmm_fits[g] = fmm.fit(
+                        top_k.loc[g].values.astype(np.float64), esc_k,
+                    )
+
+                sync_k = prelim.run(
+                    expr_ordered   = top_k,
+                    circular_scale = esc_k,
+                    core_genes     = core_present,
+                    fmm_fits       = fmm_fits,
+                )
+                esc_fin = sync_k.circular_scale
+
+                # ── Legitimidad del orden circular candidato ────────────
+                max_gap_k = _max_circular_gap(esc_fin)
+                legitimo = max_gap_k < pi and (
+                    max_gap_pre is None or max_gap_k <= max_gap_pre
+                )
+                if legitimo or attempt >= _MAX_LEGITIMACY_ATTEMPTS:
+                    if not legitimo:
+                        ref_txt = (
+                            f", referencia={max_gap_pre:.4f} rad"
+                            if max_gap_pre is not None else ""
+                        )
+                        self._log(
+                            f"  AVISO [legitimidad] repeticion {k+1}: ningun "
+                            f"subconjunto cumplio las condiciones tras "
+                            f"{attempt} intentos (hueco max={max_gap_k:.4f} "
+                            f"rad{ref_txt}). Se acepta el ultimo intento."
+                        )
+                    break
+
+            orientation_changed = bool(sync_k.direction_flipped)
             flipped_arr[k] = orientation_changed
 
             # Orden global (en indices originales 0..n-1)
-            global_order = order_k[o_fin]
+            global_order = order_k[sync_k.sample_order]
             sample_orders[k] = global_order
             circ_scales[k]   = esc_fin
+            sel_names[k]     = genes_k_arr
 
             # Pico ARNTL para rotacion de la escala
             arntl_peak_raw = (
@@ -909,7 +938,7 @@ class RobustOrderEstimator:
             per_rep_fmm.append(pd.DataFrame(fmm_mat, index=names_top))
 
         return (sample_orders, circ_scales, flipped_arr,
-                stats_table, per_rep_fmm)
+                stats_table, per_rep_fmm, sel_names)
 
     # ==================================================================
     # Fase A.2b — Correccion de orientaciones

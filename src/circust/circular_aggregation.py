@@ -40,9 +40,14 @@ Metodos implementados
   el criterio MSCE (Mean Sum of Circular Errors). Los costes de arista siguen
   la Tabla 1 y la ecuacion (7) del paper.
 
-- **HODs**: Hodge score-based triplewise (Teorema 4.1). Reduce los flujos por
-  tripletes a una matriz, elige un ancla y ordena por scores. Equivale a la
-  variante "ave" de ``isocir::ACO(method="CH")``, reproducida exactamente.
+- **HODs**: Hodge score-based triplewise (Tabla 2 y Teorema 4.1). El flujo
+  solo es no nulo en los tripletes que contienen el ancla ``l``, donde vale la
+  diferencia de angulos rotados a ``theta_l = 0``. Los angulos se agregan entre
+  experimentos por media circular y el ancla se elige por ``gamma_l``. Es la
+  variante ``nat`` de ``isocir::ACO(method="CH")`` (que fija el ancla en el
+  primer item), verificada contra ella en ``tests/test_circular_aggregation.py``.
+  Una version anterior de este modulo implementaba por error la variante
+  ``ave`` de isocir, que no aparece en el paper y da un MSCE mucho peor.
 
 Funcion objetivo (MSCE)
 -----------------------
@@ -481,72 +486,79 @@ def _circular_mean_order(
 # Seccion 3b — HODs (Hodge score-based triplewise; Barragan et al. 2015)
 # ═══════════════════════════════════════════════════════════════════════════
 
-@njit(cache=True, fastmath=True)
-def _hodge_X_ave(Theta: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Hipermatriz triplewise reducida ``X[i,j] = sum_k sum_a w_a Psi^a_ijk``.
+def _hodge_anchored_means(
+    Theta: np.ndarray, w: np.ndarray,
+) -> np.ndarray:
+    """Medias circulares ponderadas de los angulos rotados a cada ancla.
 
-    Flujo score-based (HODs): ``Psi_ijk = sign(i,j,k) * lambda``, con
-    ``sign(i,j,k) = sign(th_j-th_i)+sign(th_k-th_j)+sign(th_i-th_k)`` (signo
-    crudo de las diferencias, como isocir) y ``lambda`` la media circular de las
-    tres distancias de arco del triplete. ``X = delta*_1(Psi)`` (suma sobre el
-    tercer indice). Es la variante "ave" de ``isocir::ACO(method="CH")``,
-    reproducida exactamente. O(K*n^3) acelerada con numba.
+    ``A[l, i]`` es la media circular, ponderada por ``w`` sobre los K
+    experimentos, de ``(theta_i^j - theta_l^j) mod 2pi``. Es el paso con el que
+    el paper pasa de angulos a scores en ``V^(l)``: eliminar ``l`` y tomarlo como
+    origen del circulo, con lo que los angulos rotados son ya valores lineales
+    en ``[0, 2pi)`` y ``psi_lhk = a_k - a_h``. La agregacion entre experimentos
+    por media circular es la que el paper senala para ``Psi^j`` y la que usa
+    ``isocir`` (variante ``nat``). ``A[l, l] = 0`` por construccion.
     """
-    K, n = Theta.shape
-    X = np.zeros((n, n))
-    signM = np.empty((n, n)); sinA = np.empty((n, n)); cosA = np.empty((n, n))
-    for a in range(K):
-        th = Theta[a]
-        # precomputo por experimento: signo crudo y sin/cos del arco minimo
-        for x in range(n):
-            for y in range(n):
-                signM[x, y] = np.sign(th[x] - th[y])
-                d = (th[x] - th[y]) % TWO_PI
-                arc = d if d < (TWO_PI - d) else (TWO_PI - d)
-                sinA[x, y] = np.sin(arc); cosA[x, y] = np.cos(arc)
-        wa = w[a]
-        for i in range(n):
-            for j in range(n):
-                acc = 0.0
-                sij = signM[j, i]; sinij = sinA[i, j]; cosij = cosA[i, j]
-                for k in range(n):
-                    sig = sij + signM[k, j] + signM[i, k]
-                    if sig == 0.0:
-                        continue
-                    A = sinij + sinA[j, k] + sinA[k, i]
-                    B = cosij + cosA[j, k] + cosA[k, i]
-                    acc += sig * (np.arctan2(A, B) % TWO_PI)
-                X[i, j] += wa * acc
-    return X
+    rot = (Theta[:, None, :] - Theta[:, :, None]) % TWO_PI      # (K, n, n)
+    S = np.einsum("k,kli->li", w, np.sin(rot))
+    C = np.einsum("k,kli->li", w, np.cos(rot))
+    return np.arctan2(S, C) % TWO_PI
 
 
 def _hodge_order(
-    Theta: np.ndarray, weights: Optional[np.ndarray] = None,
+    Theta:   np.ndarray,
+    weights: Optional[np.ndarray] = None,
+    anchor:  Optional[int] = None,
 ) -> np.ndarray:
-    """Orden consenso por el enfoque de Hodge (Teorema 4.1, Barragan et al.).
+    """HODs: orden consenso por Hodge con flujo score-based (Barragan et al.).
 
-    Reduce los flujos triplewise a ``X`` con :func:`_hodge_X_ave`, elige el ancla
-    ``l0 = argmax_l sum_h X[l,h]^2``, calcula los scores ``s_i`` como menos la
-    media de la fila ``i`` de ``X`` sin el ancla, y ordena de menor a mayor
-    dejando el ancla al final (orden circular ``l0 <= i_1 <= ... <= i_{n-1} <= l0``).
+    Es la variante ``HODs`` de la Tabla 2 del paper. Para el ancla ``l`` el
+    flujo triplewise vale ``psi_lhk = sign(l,h,k) * |theta_h - theta_k|`` sobre
+    los angulos rotados a ``theta_l = 0``, que se reduce a ``a_k - a_h``, y es
+    cero en los tripletes que no contienen a ``l``. Con esa hipermatriz el
+    Teorema 4.1 da ``Y_ih = (a_h - a_i)/n`` para ``i, h != l`` y scores
+    ``s_i = -(1/(n-1)) sum_{h != l} Y_ih = (a_i - media(a))/n``, de modo que el
+    orden circular ``l <= i_1 <= ... <= i_{n-1} <= l`` es el de ``a`` creciente.
+    Esto es lo que se calcula aqui de forma directa, en O(K n^2), sin construir
+    la hipermatriz. El test ``test_hods_coincide_con_teorema_4_1_literal``
+    verifica esta reduccion contra la aplicacion literal del teorema.
+
+    El ancla se elige como propone el paper para HODp y HODs,
+    ``l0 = argmax_l gamma_l`` con ``gamma_l = sum_{h,k in V^(l)} psi_lhk^2``.
+    ``anchor`` permite fijarla, util para reproducir ``isocir``, cuya variante
+    ``nat`` usa siempre el primer item.
+
+    En el regimen de CIRCUST, con las K repeticiones ya sincronizadas, este
+    metodo coincide en la practica con ordenar por la media circular de las
+    fases de cada muestra, lo que explica que TSP3 y HODs empaten en MSCE.
 
     Returns
     -------
-    np.ndarray (n,) : permutacion de items (``order[pos]`` = item en la posicion).
+    np.ndarray (n,) : permutacion de items con el ancla en la primera posicion.
     """
-    Theta = np.ascontiguousarray(np.asarray(Theta, dtype=float) % TWO_PI)
+    Theta = np.asarray(Theta, dtype=float) % TWO_PI
     K, n = Theta.shape
     if weights is None:
         w = np.ones(K) / K
     else:
         w = np.asarray(weights, dtype=float)
         w = w / w.sum()
-    X = _hodge_X_ave(Theta, w)
-    out = int(np.argmax((X ** 2).sum(axis=1)))
-    keep = np.array([e for e in range(n) if e != out])
-    scores = -X[np.ix_(keep, keep)].mean(axis=1)
-    order_keep = keep[np.argsort(scores, kind="stable")]
-    return np.concatenate([order_keep, [out]])
+    A = _hodge_anchored_means(Theta, w)                         # (n, n)
+
+    if anchor is None:
+        # gamma_l = sum_{h,k != l} (a_k - a_h)^2 = 2 (n-1) sum a^2 - 2 (sum a)^2
+        # (las sumas excluyen l, cuyo a_l es 0).
+        gamma = 2.0 * (n - 1) * (A ** 2).sum(axis=1) - 2.0 * A.sum(axis=1) ** 2
+        l0 = int(np.argmax(gamma))
+    else:
+        l0 = int(anchor)
+        if not 0 <= l0 < n:
+            raise ValueError(f"anchor debe estar en [0, {n}), got {l0}")
+
+    a = A[l0]
+    keep = np.array([i for i in range(n) if i != l0], dtype=np.int64)
+    order_keep = keep[np.argsort(a[keep], kind="stable")]
+    return np.concatenate([[l0], order_keep]).astype(np.int64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
