@@ -40,7 +40,12 @@ class SimConfig:
     day_fraction:    float = 0.60
     n_chain:         int = 3
     cluster_centers: tuple[float, ...] = (4.0, 12.0, 20.0)
-    cluster_sd:      float = 2.0
+    # 1 h y no 2 h: con 2 h cada grupo cubre +-4 h, los tres centros estan a
+    # 8 h y acaban teselando el circulo, con lo que el escenario agrupado sale
+    # indistinguible del uniforme (mayor hueco circular 2,46 h contra 2,11 h).
+    # Con 1 h el mayor hueco sube a 5,1 h y el escenario queda entre el
+    # uniforme y el de hueco, que es su sitio. Lo vigila un test.
+    cluster_sd:      float = 1.0
     gap:             tuple[float, float] = (10.0, 16.0)
     seed:            int = 0
 
