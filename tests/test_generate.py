@@ -1,9 +1,12 @@
 """Tests de simulation/generate.py."""
 import numpy as np
+import pandas as pd
 import pytest
 
-from simulation.generate import sample_times
-from simulation.truth import SimConfig, TWO_PI
+from simulation.generate import (
+    alpha_for_peak, assign_omega, fmm_wave, generate_dataset, sample_times,
+)
+from simulation.truth import ANCHOR_NAME, OPPOSITE_NAME, SimConfig, TWO_PI
 
 
 def _cfg(**kw):
@@ -92,3 +95,94 @@ def test_misma_semilla_mismos_tiempos():
 def test_muestreo_desconocido_falla():
     with pytest.raises(ValueError, match="Muestreo desconocido"):
         sample_times(_cfg(sampling="inventado"), np.random.default_rng(1))
+
+
+# ---------------------------------------------------------------------------
+# Onda FMM, inversion del pico y ensamblado de la matriz
+# ---------------------------------------------------------------------------
+
+def test_inversion_del_pico_ida_y_vuelta_es_exacta():
+    """alpha_for_peak invierte FMMModel.peak_time analiticamente."""
+    from circust.fitting.fmm import FMMModel
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        theta_peak = rng.uniform(0.0, TWO_PI)
+        beta       = rng.uniform(0.0, TWO_PI)
+        omega      = float(rng.choice([0.1, 0.3, 0.5, 0.7, 0.9]))
+        alpha      = alpha_for_peak(theta_peak, beta, omega)
+        recuperado = FMMModel.peak_time(alpha, beta, omega)
+        d = abs(recuperado - theta_peak) % TWO_PI
+        assert min(d, TWO_PI - d) < 1e-9
+
+
+def test_el_maximo_de_la_onda_cae_en_el_pico_pedido():
+    """Comprobacion independiente: el argmax sobre una rejilla fina."""
+    rejilla = np.linspace(0.0, TWO_PI, 200_000, endpoint=False)
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        theta_peak = rng.uniform(0.0, TWO_PI)
+        beta       = rng.uniform(0.0, TWO_PI)
+        omega      = float(rng.choice([0.1, 0.5, 0.9]))
+        alpha      = alpha_for_peak(theta_peak, beta, omega)
+        y          = fmm_wave(rejilla, 0.0, 1.0, alpha, beta, omega)
+        obtenido   = rejilla[int(np.argmax(y))]
+        d = abs(obtenido - theta_peak) % TWO_PI
+        assert min(d, TWO_PI - d) < 1e-3
+
+
+def test_assign_omega_escalar_y_mezcla():
+    assert np.allclose(assign_omega(0.5, 7), 0.5)
+    mezcla = assign_omega((0.1, 0.9), 10)
+    assert sorted(mezcla.tolist()) == [0.1] * 5 + [0.9] * 5
+    # reparto por resto mayor, exacto tambien con n no divisible
+    assert len(assign_omega((0.1, 0.5, 0.9), 10)) == 10
+
+
+def test_generate_dataset_forma_y_composicion():
+    cfg = SimConfig(n_samples=48, n_genes=500, prop_rhythmic=0.20, n_core=30,
+                    omega=0.5, amplitude=1.0, sigma=1.0, seed=42)
+    X, truth = generate_dataset(cfg)
+    assert X.shape == (500, 48)
+    assert len(truth.theta_true) == 48
+    kinds = truth.gene_params["kind"].value_counts()
+    assert kinds["core"] == 30
+    assert kinds["ritmico"] == 70      # 100 ritmicos menos 30 core
+    assert kinds["fondo"] == 400
+    assert ANCHOR_NAME in X.index and OPPOSITE_NAME in X.index
+
+
+def test_generate_dataset_es_reproducible():
+    cfg = SimConfig(n_samples=24, n_genes=200, seed=3)
+    a, ta = generate_dataset(cfg)
+    b, tb = generate_dataset(cfg)
+    pd.testing.assert_frame_equal(a, b)
+    assert np.array_equal(ta.theta_true, tb.theta_true)
+
+
+def test_las_filas_estan_barajadas():
+    """Ningun indice de fila debe filtrar el tipo de gen al pipeline."""
+    cfg = SimConfig(n_samples=24, n_genes=300, seed=9)
+    X, _ = generate_dataset(cfg)
+    primeras = list(X.index[:30])
+    assert not all(n.startswith("CORE_") for n in primeras)
+
+
+def test_sin_ruido_los_core_ajustan_su_pico():
+    """Con sigma=0 el FMM recupera el pico que se fijo por construccion."""
+    from circust.fitting.fmm import FMMModel
+    cfg = SimConfig(n_samples=96, n_genes=200, prop_rhythmic=0.30, n_core=10,
+                    core_sizes=(10,), omega=0.5, amplitude=1.0, sigma=0.0,
+                    sampling="equiespaciado", seed=4)
+    X, truth = generate_dataset(cfg)
+    theta = truth.theta_true
+    orden = np.argsort(theta)
+    peak_of = dict(zip(truth.core_names, truth.core_peaks))
+    fit = FMMModel().fit(X.loc[ANCHOR_NAME].values[orden], theta[orden])
+    d = abs(fit.peak_time - peak_of[ANCHOR_NAME]) % TWO_PI
+    assert min(d, TWO_PI - d) < 0.05
+
+
+def test_prop_rhythmic_menor_que_n_core_falla():
+    cfg = SimConfig(n_samples=24, n_genes=100, prop_rhythmic=0.05, n_core=30)
+    with pytest.raises(ValueError, match="genes ritmicos"):
+        generate_dataset(cfg)
