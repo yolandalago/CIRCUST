@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from simulation.metrics import (
-    circular_correlation, circular_distance, evaluate,
-    kendall_tau_best_cut, kendall_tau_fixed_cut, oracle_mae_h, to_hours,
+    circular_correlation, circular_correlation_cos, circular_distance,
+    evaluate, kendall_tau_fixed_cut, oracle_mae_h, tau_circular, to_hours,
 )
 from simulation.truth import TWO_PI
 
@@ -59,12 +59,64 @@ def test_kendall_perfecto_y_perfectamente_invertido():
     assert kendall_tau_fixed_cut(theta, (-theta) % TWO_PI) < 0.0
 
 
-def test_kendall_best_cut_rescata_un_desfase_pequeno():
-    """Un desfase pequeno destroza tau con corte fijo pero no el best cut."""
-    theta = _ang(np.linspace(0, 24, 48, endpoint=False))
-    desfasado = (theta + 0.4) % TWO_PI
-    assert kendall_tau_best_cut(theta, desfasado) > kendall_tau_fixed_cut(theta, desfasado)
-    assert kendall_tau_best_cut(theta, desfasado) == pytest.approx(1.0)
+def test_tau_circular_es_invariante_a_cualquier_rotacion():
+    """
+    La propiedad que justifica los tripletes. Con corte fijo, un desfase de
+    3 rad deja tau en 0,015, que se lee como si no hubiera relacion ninguna
+    cuando la reconstruccion es perfecta.
+    """
+    theta = np.sort(np.random.default_rng(3).uniform(0, TWO_PI, 40))
+    for delta in (0.0, 0.4, 1.5, 3.0, 5.7):
+        rotado = (theta + delta) % TWO_PI
+        assert tau_circular(theta, rotado) == pytest.approx(1.0)
+    # con corte fijo la de 3 rad se lee como ausencia de relacion
+    assert abs(kendall_tau_fixed_cut(theta, (theta + 3.0) % TWO_PI)) < 0.1
+
+
+def test_tau_circular_da_menos_uno_al_reflejar_aunque_este_rotado():
+    """
+    El signo separa las dos patologias: +1 con rotacion es que fallo el
+    origen, -1 es que fallo la orientacion. Con corte fijo, reflejado y
+    rotado a la vez da -0,015, indistinguible del azar.
+    """
+    theta = np.sort(np.random.default_rng(3).uniform(0, TWO_PI, 40))
+    for delta in (0.0, 2.0, 4.5):
+        reflejado = (-theta + delta) % TWO_PI
+        assert tau_circular(theta, reflejado) == pytest.approx(-1.0)
+    assert abs(kendall_tau_fixed_cut(theta, (-theta + 2.0) % TWO_PI)) < 0.1
+
+
+def test_tau_circular_vale_cero_sin_relacion_y_degrada_con_el_ruido():
+    rng = np.random.default_rng(11)
+    theta = np.sort(rng.uniform(0, TWO_PI, 40))
+    assert abs(tau_circular(theta, rng.uniform(0, TWO_PI, 40))) < 0.2
+    suave = tau_circular(theta, (theta + rng.normal(0, 0.2, 40)) % TWO_PI)
+    fuerte = tau_circular(theta, (theta + rng.normal(0, 0.8, 40)) % TWO_PI)
+    assert 1.0 > suave > fuerte > 0.0
+
+
+def test_rho_cos_no_falla_donde_falla_la_de_jammalamadaka():
+    """
+    La robusta no usa direccion media, asi que funciona tambien con muestreo
+    exactamente equiespaciado, donde la de la tutora no esta definida.
+    """
+    rejilla = _ang(np.linspace(0, 24, 40, endpoint=False))
+    assert np.isnan(circular_correlation(rejilla, rejilla))
+    assert circular_correlation_cos(rejilla, rejilla) == pytest.approx(1.0)
+
+
+def test_rho_cos_vale_menos_uno_en_oposicion_y_no_es_invariante_a_rotacion():
+    """
+    Que no sea invariante a rotacion es deliberado: mide el acuerdo en el
+    marco tal cual, igual que mae_h. Quien mide el orden con independencia
+    del marco es tau_circular.
+    """
+    theta = np.random.default_rng(4).uniform(0, TWO_PI, 40)
+    assert circular_correlation_cos(theta, theta) == pytest.approx(1.0)
+    assert circular_correlation_cos(theta, (theta + np.pi) % TWO_PI) == pytest.approx(-1.0)
+    for delta in (0.4, 1.5, 3.0):
+        esperado = np.cos(delta)
+        assert circular_correlation_cos(theta, (theta + delta) % TWO_PI) == pytest.approx(esperado)
 
 
 def test_oracle_encuentra_la_rotacion_y_la_reflexion():
@@ -77,8 +129,8 @@ def test_oracle_encuentra_la_rotacion_y_la_reflexion():
 def test_evaluate_devuelve_todas_las_claves():
     theta = np.random.default_rng(2).uniform(0, TWO_PI, 24)
     m = evaluate(theta, theta)
-    esperadas = {"mae_h", "medae_h", "rho_circ", "tau", "tau_best_cut",
-                 "p1", "p2", "p4", "mae_h_oracle"}
+    esperadas = {"mae_h", "medae_h", "rho_circ", "rho_cos", "tau",
+                 "tau_circ", "p1", "p2", "p4", "mae_h_oracle"}
     assert set(m) == esperadas
     assert m["mae_h"] == pytest.approx(0.0)
     assert m["p1"] == pytest.approx(1.0)

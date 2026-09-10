@@ -93,27 +93,74 @@ def kendall_tau_fixed_cut(a, b) -> float:
     return float(resultado.statistic)
 
 
-def kendall_tau_best_cut(theta_true, theta_hat) -> float:
+def _orientacion(x: np.ndarray, i: int, J: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """Sentido de giro del triplete ``(i, J, K)`` sobre el circulo, en +-1."""
+    return np.sign(
+        np.sin(x[J] - x[i]) + np.sin(x[K] - x[J]) + np.sin(x[i] - x[K])
+    )
+
+
+def tau_circular(theta_true, theta_hat) -> float:
     """
-    Maximo de ``kendall_tau_fixed_cut`` sobre los cortes de la escala estimada.
+    Concordancia circular por tripletes, sin corte y sin barrido.
 
-    El corte se mueve **solo en la estimada**, no en las dos a la vez. La
-    escala verdadera tiene origen propio, el tiempo circadiano real, mientras
-    que la estimada lo tiene arbitrario, y es ese el que se deja libre. Rotar
-    las dos juntas no puede deshacer un desfase entre ellas: con la estimada
-    adelantada 0,4 rad sobre 48 muestras, barrer el corte en ambas deja tau en
-    0,761 mientras que barrerlo solo en la estimada lo lleva a 1,000.
+    Dos puntos de un circulo no tienen orden mientras no se elija un corte, y
+    de ahi salia todo el problema de ``tau``: la muestra que se estima pasado
+    2*pi vuelve al principio y arrastra el ranking entero. Tres puntos si
+    tienen orden: recorren el circulo en un sentido o en el otro, y eso no
+    depende de ningun corte. Se cuenta en cuantos tripletes coinciden las dos
+    escalas.
 
-    Con ``n <= 96`` el coste es despreciable.
+    Propiedades, todas medidas sobre 40 muestras:
+
+    - invariante a rotar cualquiera de las dos escalas. Un desfase de 3 rad
+      deja ``tau`` con corte fijo en 0,015, que se lee como si no hubiera
+      relacion ninguna, mientras que esta da 1,000, que es la verdad.
+    - el signo separa las dos patologias. ``+1`` con rotacion significa que el
+      orden esta bien y fallo el origen, ``-1`` que fallo la orientacion.
+      Reflejado y rotado a la vez deja ``tau`` en -0,015, otra vez como si no
+      hubiera relacion, y esta lo llama -1,000.
+    - vale ``0`` sin relacion y degrada de forma suave con el ruido.
+
+    Coste ``O(n^3)`` en tiempo pero ``O(n^2)`` en memoria, y con ``n <= 96``
+    son unos milisegundos.
     """
     a = np.asarray(theta_true, dtype=float) % TWO_PI
     b = np.asarray(theta_hat,  dtype=float) % TWO_PI
-    mejor = -1.0
-    for corte in np.unique(b):
-        t = kendall_tau_fixed_cut(a, (b - corte) % TWO_PI)
-        if t > mejor:
-            mejor = t
-    return float(mejor)
+    n = a.size
+    if n < 3:
+        return float("nan")
+
+    suma  = 0.0
+    total = 0
+    for i in range(n - 2):
+        resto = np.arange(i + 1, n)
+        jj, kk = np.triu_indices(resto.size, 1)
+        J, K = resto[jj], resto[kk]
+        suma  += float(np.sum(_orientacion(a, i, J, K)
+                              * _orientacion(b, i, J, K)))
+        total += J.size
+    return suma / total
+
+
+def circular_correlation_cos(a, b) -> float:
+    """
+    Correlacion circular robusta: media del coseno de la diferencia.
+
+        rho_cos = (1/n) sum cos(a_i - b_i)
+
+    Vale 1 si las dos escalas coinciden, 0 si no guardan relacion y -1 si son
+    opuestas. **No usa direccion media en ningun punto**, asi que no puede
+    fallar por lo que le pasa a ``circular_correlation`` cuando las muestras
+    cubren todo el ciclo y la resultante se va a cero.
+
+    No es invariante a rotacion, y eso es deliberado: mide el acuerdo en el
+    marco tal cual, igual que ``mae_h``. Quien mide el orden con independencia
+    del marco es ``tau_circular``.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    return float(np.mean(np.cos(a - b)))
 
 
 def oracle_mae_h(theta_true, theta_hat, n_grid: int = 720) -> float:
@@ -148,11 +195,14 @@ def evaluate(theta_true, theta_hat) -> dict[str, float]:
 
     dh = to_hours(circular_distance(tt, th))
     salida = {
-        "mae_h":        float(dh.mean()),
-        "medae_h":      float(np.median(dh)),
-        "rho_circ":     circular_correlation(tt, th),
-        "tau":          kendall_tau_fixed_cut(tt, th),
-        "tau_best_cut": kendall_tau_best_cut(tt, th),
+        # en el marco tal cual, es lo que se reporta
+        "mae_h":    float(dh.mean()),
+        "medae_h":  float(np.median(dh)),
+        "rho_circ": circular_correlation(tt, th),
+        "rho_cos":  circular_correlation_cos(tt, th),
+        "tau":      kendall_tau_fixed_cut(tt, th),
+        # invariante al marco, es el diagnostico
+        "tau_circ": tau_circular(tt, th),
     }
     for tol in TOLERANCIAS_H:
         salida[f"p{int(tol)}"] = float((dh <= tol).mean())
