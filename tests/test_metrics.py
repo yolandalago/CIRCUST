@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from simulation.metrics import (
-    circular_correlation, circular_correlation_cos, circular_distance,
-    evaluate, kendall_tau_fixed_cut, oracle_mae_h, tau_circular, to_hours,
+    circular_correlation, circular_distance, evaluate,
+    kendall_tau_fixed_cut, oracle_mae_h, tau_circular, to_hours,
 )
 from simulation.truth import TWO_PI
 
@@ -95,30 +95,6 @@ def test_tau_circular_vale_cero_sin_relacion_y_degrada_con_el_ruido():
     assert 1.0 > suave > fuerte > 0.0
 
 
-def test_rho_cos_no_falla_donde_falla_la_de_jammalamadaka():
-    """
-    La robusta no usa direccion media, asi que funciona tambien con muestreo
-    exactamente equiespaciado, donde la de la tutora no esta definida.
-    """
-    rejilla = _ang(np.linspace(0, 24, 40, endpoint=False))
-    assert np.isnan(circular_correlation(rejilla, rejilla))
-    assert circular_correlation_cos(rejilla, rejilla) == pytest.approx(1.0)
-
-
-def test_rho_cos_vale_menos_uno_en_oposicion_y_no_es_invariante_a_rotacion():
-    """
-    Que no sea invariante a rotacion es deliberado: mide el acuerdo en el
-    marco tal cual, igual que mae_h. Quien mide el orden con independencia
-    del marco es tau_circular.
-    """
-    theta = np.random.default_rng(4).uniform(0, TWO_PI, 40)
-    assert circular_correlation_cos(theta, theta) == pytest.approx(1.0)
-    assert circular_correlation_cos(theta, (theta + np.pi) % TWO_PI) == pytest.approx(-1.0)
-    for delta in (0.4, 1.5, 3.0):
-        esperado = np.cos(delta)
-        assert circular_correlation_cos(theta, (theta + delta) % TWO_PI) == pytest.approx(esperado)
-
-
 def test_oracle_encuentra_la_rotacion_y_la_reflexion():
     theta = _ang(np.linspace(0, 24, 48, endpoint=False))
     estimado = (-theta + 2.0) % TWO_PI     # reflejado y rotado
@@ -129,7 +105,7 @@ def test_oracle_encuentra_la_rotacion_y_la_reflexion():
 def test_evaluate_devuelve_todas_las_claves():
     theta = np.random.default_rng(2).uniform(0, TWO_PI, 24)
     m = evaluate(theta, theta)
-    esperadas = {"mae_h", "medae_h", "rho_circ", "rho_cos", "tau",
+    esperadas = {"mae_h", "medae_h", "rho_circ", "tau",
                  "tau_circ", "p1", "p2", "p4", "mae_h_oracle"}
     assert set(m) == esperadas
     assert m["mae_h"] == pytest.approx(0.0)

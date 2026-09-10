@@ -5,7 +5,8 @@ Todas trabajan con angulos en ``[0, 2*pi)`` y devuelven los errores en horas,
 que es lo interpretable. La comparacion no necesita alineamiento previo: el
 gen ancla tiene su pico en ``pi`` por construccion y el sincronizador coloca
 el pico estimado en ``pi``, asi que las dos escalas viven en el mismo marco.
-Las dos medidas ``oracle`` y ``best_cut`` existen solo como diagnostico.
+Las dos medidas ``mae_h_oracle`` y ``tau_circ`` existen solo como
+diagnostico: dicen si el fallo fue del orden o solo del anclaje.
 """
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ def kendall_tau_fixed_cut(a, b) -> float:
 
     Es la medida que pide la spec. Castiga mucho un desfase pequeno, porque
     las muestras que cruzan el corte saltan al extremo opuesto del ranking.
-    Por eso existe ``kendall_tau_best_cut`` al lado.
+    Por eso existe ``tau_circular`` al lado, que no necesita corte.
     """
     a = np.asarray(a, dtype=float) % TWO_PI
     b = np.asarray(b, dtype=float) % TWO_PI
@@ -143,26 +144,6 @@ def tau_circular(theta_true, theta_hat) -> float:
     return suma / total
 
 
-def circular_correlation_cos(a, b) -> float:
-    """
-    Correlacion circular robusta: media del coseno de la diferencia.
-
-        rho_cos = (1/n) sum cos(a_i - b_i)
-
-    Vale 1 si las dos escalas coinciden, 0 si no guardan relacion y -1 si son
-    opuestas. **No usa direccion media en ningun punto**, asi que no puede
-    fallar por lo que le pasa a ``circular_correlation`` cuando las muestras
-    cubren todo el ciclo y la resultante se va a cero.
-
-    No es invariante a rotacion, y eso es deliberado: mide el acuerdo en el
-    marco tal cual, igual que ``mae_h``. Quien mide el orden con independencia
-    del marco es ``tau_circular``.
-    """
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    return float(np.mean(np.cos(a - b)))
-
-
 def oracle_mae_h(theta_true, theta_hat, n_grid: int = 720) -> float:
     """
     MAE en horas bajo la mejor rotacion y orientacion posibles.
@@ -199,7 +180,6 @@ def evaluate(theta_true, theta_hat) -> dict[str, float]:
         "mae_h":    float(dh.mean()),
         "medae_h":  float(np.median(dh)),
         "rho_circ": circular_correlation(tt, th),
-        "rho_cos":  circular_correlation_cos(tt, th),
         "tau":      kendall_tau_fixed_cut(tt, th),
         # invariante al marco, es el diagnostico
         "tau_circ": tau_circular(tt, th),
