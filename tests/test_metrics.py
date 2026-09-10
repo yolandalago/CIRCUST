@@ -105,8 +105,8 @@ def test_oracle_encuentra_la_rotacion_y_la_reflexion():
 def test_evaluate_devuelve_todas_las_claves():
     theta = np.random.default_rng(2).uniform(0, TWO_PI, 24)
     m = evaluate(theta, theta)
-    esperadas = {"mae_h", "medae_h", "rho_circ", "tau",
-                 "tau_circ", "p1", "p2", "p4", "mae_h_oracle"}
+    esperadas = {"mae_h", "medae_h", "rho_circ", "tau", "tau_circ",
+                 "orientacion_ok", "p1", "p2", "p4", "mae_h_oracle"}
     assert set(m) == esperadas
     assert m["mae_h"] == pytest.approx(0.0)
     assert m["p1"] == pytest.approx(1.0)
@@ -152,3 +152,20 @@ def test_rho_es_solido_en_mediana_pero_tiene_cola_de_signo_contrario():
     assert (rhos < 0).mean() < 0.05, "la cola no deberia pasar del 5 %"
     # y la cola existe de verdad, no es una precaucion teorica
     assert rhos.min() < 0.0
+
+
+def test_orientacion_ok_marca_el_sentido_de_giro():
+    """
+    Columna separada del error porque son cosas distintas: el orden puede
+    estar bien recuperado y el sentido al reves. Promediada sobre replicas da
+    directamente la tasa de acierto de orientacion, que es lo que el capitulo
+    necesita para no mezclar reconstruccion con suerte.
+    """
+    rng = np.random.default_rng(5)
+    theta = np.sort(rng.uniform(0, TWO_PI, 40))
+    ruido = (theta + rng.normal(0, 0.2, 40)) % TWO_PI
+
+    assert evaluate(theta, ruido)["orientacion_ok"] == 1.0
+    assert evaluate(theta, (-ruido) % TWO_PI)["orientacion_ok"] == 0.0
+    # rotar no cambia el sentido de giro
+    assert evaluate(theta, (ruido + 2.5) % TWO_PI)["orientacion_ok"] == 1.0

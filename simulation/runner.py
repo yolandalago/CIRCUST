@@ -28,6 +28,8 @@ simulacion sirve para calibrar su relacion con el error real:
 
 ``r2_anchor``     lo bien determinado que esta el pico que fija el origen.
 ``pares_ok``      fraccion de pares a priori que se cumplen en el marco final.
+``evidencia``     suma de |sin(delta)| sobre esos pares, o sea cuanta
+                  informacion sobre la orientacion habia disponible.
 ``desacuerdo_K``  dispersion entre las K repeticiones de la Etapa 4.
 ``n_top``         tamano del conjunto TOP, o sea cuanta senal ritmica habia.
 """
@@ -105,6 +107,7 @@ class PreRobustState:
     n_top:          int
     r2_anchor:      float
     pares_ok:       float
+    evidencia:      float
     timing:         dict = field(default_factory=dict)
 
 
@@ -127,30 +130,41 @@ class RunResult:
     n_outliers:      int
     r2_anchor:       float
     pares_ok:        float
+    evidencia:       float
     desacuerdo_K:    float
     direction_flips: int
 
 
-def _fraccion_pares_cumplidos(
+def _diagnostico_pares(
     core_genes: list[str],
     peak_times: np.ndarray,
     r2_fmm:     np.ndarray,
     pares:      list[tuple[str, str]],
-) -> float:
+) -> tuple[float, float]:
     """
-    Fraccion de pares a priori que se cumplen en el marco final.
+    Dos indicadores observables sobre los pares a priori en el marco final.
 
-    Replica la regla del Paso 2.2 de ``CircularSynchronizer``, comparacion
-    lineal de los picos en ``[0, 2*pi)`` exigiendo ``R2 >= 0,5`` a los dos
-    genes del par. La diferencia es que alli solo se evalua cuando salta el
-    aviso de orientacion, y aqui se evalua siempre, porque como indicador
-    interesa tenerlo en todas las celdas.
+    ``pares_ok``
+        Fraccion de pares que se cumplen, con la misma regla de signo que usa
+        el Paso 2.2, ``sin(peak(g2) - peak(g1)) > 0``.
+    ``evidencia``
+        Suma de ``|sin(delta)|``, o sea cuanta informacion sobre la
+        orientacion habia realmente disponible. Su maximo es el numero de
+        pares evaluables y se alcanza cuando todos estan separados 6 h. Cae a
+        cero cuando los pares son antipodales, que no distinguen el sentido, o
+        cuando los genes que los portan estan mal ajustados y no superan el
+        filtro de R2.
 
-    Devuelve ``nan`` si ningun par es evaluable, que es informacion distinta
+    Es la variable candidata a decidir si se puede confiar en el sentido de
+    giro de un tejido sin conocer la verdad. El umbral no se fija aqui: lo
+    calibra el estudio, comparando esta cantidad contra ``orientacion_ok``.
+
+    Ambos son ``nan`` si ningun par es evaluable, que es informacion distinta
     de que ningun par se cumpla.
     """
     indice = {g: i for i, g in enumerate(core_genes)}
     n_valid = n_agree = 0
+    evidencia = 0.0
     for g_antes, g_despues in pares:
         i_a, i_d = indice.get(g_antes), indice.get(g_despues)
         if i_a is None or i_d is None:
@@ -158,9 +172,12 @@ def _fraccion_pares_cumplidos(
         if r2_fmm[i_a] < CONSISTENCY_R2_MIN or r2_fmm[i_d] < CONSISTENCY_R2_MIN:
             continue
         n_valid += 1
-        if peak_times[i_a] < peak_times[i_d]:
-            n_agree += 1
-    return float(n_agree / n_valid) if n_valid else float("nan")
+        aporte = np.sin(peak_times[i_d] - peak_times[i_a])
+        n_agree += int(aporte > 0.0)
+        evidencia += abs(aporte)
+    if not n_valid:
+        return float("nan"), float("nan")
+    return float(n_agree / n_valid), float(evidencia)
 
 
 def _desacuerdo_entre_repeticiones(circular_scales: np.ndarray) -> float:
@@ -249,7 +266,7 @@ def run_stages_0_3(
     i_ancla   = (core_encontrados.index(truth.anchor)
                  if truth.anchor in core_encontrados else None)
     r2_anchor = float(r2_fmm[i_ancla]) if i_ancla is not None else float("nan")
-    pares_ok  = _fraccion_pares_cumplidos(
+    pares_ok, evidencia = _diagnostico_pares(
         core_encontrados, np.asarray(order_result.peak_times, dtype=float),
         r2_fmm, consistency_pairs,
     )
@@ -287,6 +304,7 @@ def run_stages_0_3(
         n_top          = int(top_result.candidate_matrix.shape[0]),
         r2_anchor      = r2_anchor,
         pares_ok       = pares_ok,
+        evidencia      = evidencia,
         timing         = timing,
     )
 
@@ -371,6 +389,7 @@ def run_full(
         n_outliers      = estado.n_outliers,
         r2_anchor       = estado.r2_anchor,
         pares_ok        = estado.pares_ok,
+        evidencia       = estado.evidencia,
         desacuerdo_K    = etapa4.desacuerdo_K,
         direction_flips = etapa4.direction_flips,
     )

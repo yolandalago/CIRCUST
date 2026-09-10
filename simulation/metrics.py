@@ -184,6 +184,12 @@ def evaluate(theta_true, theta_hat) -> dict[str, float]:
         # invariante al marco, es el diagnostico
         "tau_circ": tau_circular(tt, th),
     }
+    # El sentido de giro, como columna propia. Va aparte del error porque son
+    # cosas distintas: el orden puede estar bien recuperado y el ciclo
+    # reportarse al reves, y entonces mae_h mide la suerte de la orientacion y
+    # no la calidad de la reconstruccion. Promediada sobre replicas da la tasa
+    # de acierto de orientacion.
+    salida["orientacion_ok"] = float(salida["tau_circ"] > 0.0)
     for tol in TOLERANCIAS_H:
         salida[f"p{int(tol)}"] = float((dh <= tol).mean())
     salida["mae_h_oracle"] = oracle_mae_h(tt, th)

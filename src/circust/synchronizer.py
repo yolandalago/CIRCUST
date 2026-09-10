@@ -29,10 +29,22 @@ Paso 2.2 — Verificacion de consistencia biologica:
     Si direction_gene esta demasiado cerca de 0 o π, o menos de la mitad
     de los genes sin anchor/direction tienen pico en [0, π), se consulta
     ``consistency_pairs``: por cada par ``(g1, g2)`` presente en los genes
-    core y con R² >= ``consistency_r2_min`` para ambos, se comprueba si
-    peak(g1) < peak(g2). Si mas pares discrepan que coinciden, se invierte;
-    en empate, o si no hay ningun par valido con evidencia, se mantiene la
-    orientacion del Paso 2.1.
+    core y con R² >= ``consistency_r2_min`` para ambos, se acumula
+    ``sin(peak(g2) − peak(g1))``. Si la suma sale negativa se invierte; si
+    no hay ningun par valido, se mantiene la orientacion del Paso 2.1.
+
+    El seno es la version circular de "g2 viene despues de g1", y sustituye
+    a la comparacion ``peak(g1) < peak(g2)`` que se usaba antes. Aquella era
+    lineal sobre datos circulares y por tanto dependia de donde estuviera el
+    corte: con g1 a las 23 h y g2 a la 1 h, g2 pica dos horas despues pero
+    ``23 < 1`` es falso. Ademas ``|sin|`` pondera solo cuanta informacion
+    aporta cada par, maxima con 6 h de separacion y **cero con 12 h**,
+    porque en un ciclo de 24 h "12 horas despues" y "12 horas antes" son la
+    misma posicion. Con la regla anterior un par antipodal emitia un voto de
+    pleno derecho, y como la reflexion θ → 2π − θ deja quietos exactamente a
+    0 y a π, un par anclado ahi seguia "cumpliendose" tras invertir el
+    orden. Con dos pares eso empataba la votacion y dejaba pasar la
+    inversion, que es la situacion de ARNTL y DBP, casi antipodas.
 
     Esto generaliza la tripleta fija original (direction < consistency <
     anchor, un unico par encadenado) a una lista configurable de relaciones
@@ -198,11 +210,27 @@ class CircularSynchronizer:
 
     consistency_pairs : list[tuple[str, str]], opcional
         Lista de pares ``(g1, g2)`` con orden de pico conocido a priori
-        (se espera peak(g1) < peak(g2)), usada en la verificacion de
-        consistencia biologica del Paso 2.2. Cada par se evalua de forma
-        independiente y solo cuenta si ambos genes estan en los genes
-        core y su R² de ajuste FMM es >= ``consistency_r2_min``. Se
-        invierte la orientacion si mas pares discrepan que coinciden.
+        (se espera que g2 pique despues de g1), usada en la verificacion
+        de consistencia biologica del Paso 2.2. Cada par solo cuenta si
+        ambos genes estan en los genes core y su R² de ajuste FMM es
+        >= ``consistency_r2_min``.
+
+        Cada par aporta ``sin(peak(g2) - peak(g1))`` y se invierte la
+        orientacion si la suma sale negativa. El seno es la version
+        circular de "viene despues": es positivo cuando g2 esta entre 0 y
+        media vuelta por delante de g1, y negativo si esta por detras. Se
+        usa en vez de la comparacion ``peak(g1) < peak(g2)`` porque esa es
+        lineal sobre datos circulares y depende de donde este el corte:
+        con g1 estimado a las 23 h y g2 a la 1 h, g2 pica dos horas
+        despues pero ``23 < 1`` es falso.
+
+        La magnitud ``|sin|`` pondera sola cuanta informacion aporta el
+        par. Es maxima con 6 h de separacion y **cero con 12 h**, porque
+        en un ciclo de 24 h "12 horas despues" y "12 horas antes" son la
+        misma posicion y ese par no puede distinguir la direccion. Con la
+        regla anterior un par asi emitia un voto de pleno derecho que
+        podia empatar la votacion y dejar pasar una inversion, que es lo
+        que ocurre en cuanto los dos genes de anclaje son casi antipodas.
         Por defecto: ``DEFAULT_CONSISTENCY_PAIRS`` (``DBP < CRY1 < ARNTL``,
         la unica relacion con respaldo directo del metodo original).
 
@@ -472,50 +500,52 @@ class CircularSynchronizer:
         )
         mitad = int(np.floor((n_core - 2) / 2))
 
+        # Diagnostico de si el Paso 2.1 tenia base para decidir. Ya no decide
+        # si se consulta el conocimiento a priori, solo se registra.
         p6am  = 1.0 - np.cos(direction_peak)
         p6pm  = 1.0 - np.cos(direction_peak - pi)
         aviso = (p6am <= 0.1) or (p6pm <= 0.1) or (peak_d < mitad)
 
-        if aviso:
-            gene_idx = {g: i for i, g in enumerate(core_genes)}
-            n_agree  = 0
-            n_valid  = 0
-            for g_before, g_after in self.consistency_pairs:
-                i_before = gene_idx.get(g_before)
-                i_after  = gene_idx.get(g_after)
-                if i_before is None or i_after is None:
-                    continue
-                if (r2_fmm[i_before] < self.consistency_r2_min
-                        or r2_fmm[i_after] < self.consistency_r2_min):
-                    continue
-                n_valid += 1
-                if peaks[i_before] < peaks[i_after]:
-                    n_agree += 1
+        gene_idx = {g: i for i, g in enumerate(core_genes)}
+        score    = 0.0     # suma de sin(delta), su signo decide
+        evidence = 0.0     # suma de |sin(delta)|, cuanta informacion habia
+        n_valid  = 0
+        for g_before, g_after in self.consistency_pairs:
+            i_before = gene_idx.get(g_before)
+            i_after  = gene_idx.get(g_after)
+            if i_before is None or i_after is None:
+                continue
+            if (r2_fmm[i_before] < self.consistency_r2_min
+                    or r2_fmm[i_after] < self.consistency_r2_min):
+                continue
+            n_valid  += 1
+            aporte    = np.sin(peaks[i_after] - peaks[i_before])
+            score    += aporte
+            evidence += abs(aporte)
 
-            if n_valid > 0:
-                n_disagree = n_valid - n_agree
-                flip = n_agree < n_disagree
-                self._log(
-                    f"    Verificacion de consistencia: {n_agree}/{n_valid} "
-                    f"pares de orden a priori se cumplen."
-                )
-            else:
-                # Sin ningun par valido (genes ausentes o mal ajustados) no
-                # hay evidencia a priori con la que decidir, asi que se
-                # mantiene la orientacion que ya establecio el Paso 2.1 en
-                # vez de invertir a ciegas. Ocurre, por ejemplo, con el
-                # conjunto core de Ruben et al. (2018), que incluye CRY2 pero
-                # no CRY1, o cuando ninguno de los dos genes de un par cayo
-                # en el subconjunto muestreado de una repeticion de la Etapa 4.
-                self._log(
-                    f"  AVISO: se ha producido una situacion de aviso sobre "
-                    f"la orientacion y ningun par de consistency_pairs esta "
-                    f"disponible/bien ajustado (R2 >= {self.consistency_r2_min}) "
-                    f"entre los genes core. Se mantiene la orientacion del "
-                    f"Paso 2.1, sin verificar ninguna relacion de fases."
-                )
-                flip = False
+        if n_valid > 0:
+            # bool de Python y no np.bool_: ``direction_flipped`` esta
+            # documentado como bool y aguas abajo se combina con XOR.
+            flip = bool(score < 0.0)
+            self._log(
+                f"    Consistencia a priori: score={score:+.3f} sobre "
+                f"{n_valid} pares (evidencia {evidence:.3f} de {n_valid:.1f} "
+                f"posible, aviso del Paso 2.1={aviso})."
+            )
         else:
+            # Sin ningun par valido (genes ausentes o mal ajustados) no hay
+            # evidencia a priori con la que decidir, asi que se mantiene la
+            # orientacion que ya establecio el Paso 2.1 en vez de invertir a
+            # ciegas. Ocurre, por ejemplo, con el conjunto core de Ruben et
+            # al. (2018), que incluye CRY2 pero no CRY1, o cuando ninguno de
+            # los dos genes de un par cayo en el subconjunto muestreado de
+            # una repeticion de la Etapa 4.
+            self._log(
+                f"  AVISO: ningun par de consistency_pairs esta "
+                f"disponible/bien ajustado (R2 >= {self.consistency_r2_min}) "
+                f"entre los genes core. Se mantiene la orientacion del "
+                f"Paso 2.1, decidida solo con {self.direction_gene}."
+            )
             flip = False
 
         n = len(o)

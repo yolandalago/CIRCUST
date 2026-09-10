@@ -111,3 +111,35 @@ def test_el_ancla_se_ajusta_peor_cuando_baja_la_senal():
         return run_stages_0_3(X, truth, 20).r2_anchor
 
     assert r2_de(4.0) > r2_de(0.25)
+
+
+def test_la_evidencia_a_priori_se_registra_y_esta_acotada(celda_pequena):
+    """
+    ``evidencia`` es la suma de |sin(delta)| sobre los pares evaluables, o sea
+    cuanta informacion sobre la orientacion habia realmente disponible. Su
+    maximo es el numero de pares, que se alcanza cuando todos estan separados
+    6 h. Es la variable candidata a predecir si se puede confiar en el sentido
+    de giro sin conocer la verdad.
+    """
+    X, truth = celda_pequena
+    n_pares = len(truth.consistency_pairs())
+    res = run_full(X, truth, 20, RobustConfig(n_reps=3))
+    assert 0.0 <= res.evidencia <= n_pares
+
+
+def test_la_evidencia_cae_cuando_los_core_se_ajustan_mal():
+    """
+    Lo que la hace util: con senal baja los genes core que portan el
+    conocimiento a priori estan mal ajustados, no superan el filtro de R2 y
+    la evidencia se desploma. Es la senal de que la orientacion no es
+    decidible, y se calcula sin usar la verdad.
+    """
+    def evidencia_de(snr):
+        cfg = SimConfig(n_samples=48, n_genes=400, prop_rhythmic=0.20,
+                        n_core=20, core_sizes=(10, 20), omega=0.5,
+                        amplitude=snr, sigma=1.0, seed=303)
+        X, truth = generate_dataset(cfg)
+        return run_stages_0_3(X, truth, 20).evidencia
+
+    fuerte, debil = evidencia_de(4.0), evidencia_de(0.25)
+    assert fuerte > debil or np.isnan(debil)

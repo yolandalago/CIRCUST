@@ -77,3 +77,45 @@ def test_cadena_de_consistencia_va_de_cero_a_pi():
 def test_pares_son_consecutivos_de_la_cadena():
     pares = consistency_pairs_from_chain(["A", "B", "C", "D"])
     assert pares == [("A", "B"), ("B", "C"), ("C", "D")]
+
+
+def _score_paso_2_2(chain, peak_of, reflejado):
+    """
+    Criterio del Paso 2.2 de CircularSynchronizer: cada par aporta
+    ``sin(peak(g2) - peak(g1))`` y se invierte si la suma sale negativa.
+    """
+    p = {g: (TWO_PI - peak_of[g]) % TWO_PI if reflejado else peak_of[g]
+         for g in chain}
+    return sum(np.sin(p[g2] - p[g1])
+               for g1, g2 in consistency_pairs_from_chain(chain))
+
+
+def test_la_cadena_por_defecto_detecta_una_reflexion():
+    """
+    Propiedad que el generador tiene que garantizar: la cadena de
+    conocimiento a priori debe bastar para distinguir la orientacion.
+
+    Con la regla lineal antigua no bastaba, porque la reflexion deja quietos
+    a 0 y a pi, que es justo donde estan CORE_B y CORE_A, y el voto empataba
+    1-1. El criterio circular la detecta con los mismos dos pares.
+    """
+    from simulation.truth import SimConfig
+    names, peaks = core_layout(30, 0.60)
+    peak_of = dict(zip(names, peaks))
+    sets  = nested_core_sets(names, (10, 20, 30), 0.60)
+    chain = consistency_chain(names, peaks, sets, SimConfig(n_samples=48).n_chain)
+
+    assert _score_paso_2_2(chain, peak_of, reflejado=False) > 0
+    assert _score_paso_2_2(chain, peak_of, reflejado=True) < 0
+
+
+def test_los_extremos_de_la_cadena_son_puntos_fijos_de_la_reflexion():
+    """
+    Deja constancia de la geometria que rompia el criterio antiguo: la
+    reflexion theta -> 2*pi - theta solo deja quietos a 0 y a pi, y ahi es
+    donde la spec de la tutora coloca CORE_B y CORE_A.
+    """
+    names, peaks = core_layout(30, 0.60)
+    peak_of = dict(zip(names, peaks))
+    for g in (ANCHOR_NAME, OPPOSITE_NAME):
+        assert (TWO_PI - peak_of[g]) % TWO_PI == pytest.approx(peak_of[g])
