@@ -13,6 +13,12 @@ Tres decisiones de agregacion, todas tomadas midiendo y no por costumbre
    reconstrucciones con orden exacto dio ``rho = -0,093``. Una sola replica
    asi arrastra la media de una celda de 20.
 
+   Por eso la correlacion que lidera las tablas es ``rho_fl``, la de Fisher y
+   Lee, que se construye sobre diferencias por pares y no necesita ninguna
+   direccion media. ``rho_circ`` se mantiene al lado porque es la que la
+   memoria presenta como "una posible medida", y su fragilidad medida es
+   justamente la justificacion de haber adoptado la otra.
+
 2. **La orientacion se agrega como TASA de acierto**, no como mediana, porque
    es una proporcion. Y va en columna propia porque ``medae_h`` mezcla dos
    cosas: si el sentido de giro sale invertido da 5 a 7 h aunque el orden sea
@@ -41,7 +47,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Medidas continuas, se agregan con mediana.
-MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "tau_circ", "rho_circ", "tau",
+MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "tau_circ", "rho_fl", "rho_circ", "tau",
            "p2", "r2_anchor", "evidencia", "desacuerdo_K", "n_top"]
 
 # Proporciones, se agregan con media porque son tasas.

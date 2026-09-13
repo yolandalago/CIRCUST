@@ -43,7 +43,7 @@ COLUMNAS: list[str] = [
     # estado
     "status", "error",
     # metricas en el marco tal cual, es lo que se reporta
-    "mae_h", "medae_h", "rho_circ", "tau",
+    "mae_h", "medae_h", "rho_circ", "rho_fl", "tau",
     "p1", "p2", "p4",
     # metricas invariantes al marco, es el diagnostico
     "tau_circ", "orientacion_ok", "mae_h_oracle",
@@ -55,7 +55,7 @@ COLUMNAS: list[str] = [
     "t_total_s",
 ]
 
-_METRICAS = ("mae_h", "medae_h", "rho_circ", "tau", "tau_circ",
+_METRICAS = ("mae_h", "medae_h", "rho_circ", "rho_fl", "tau", "tau_circ",
              "orientacion_ok", "p1", "p2", "p4", "mae_h_oracle")
 
 

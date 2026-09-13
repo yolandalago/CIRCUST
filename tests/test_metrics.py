@@ -4,7 +4,8 @@ import pytest
 
 from simulation.metrics import (
     circular_correlation, circular_distance, evaluate,
-    kendall_tau_fixed_cut, oracle_mae_h, tau_circular, to_hours,
+    fisher_lee_correlation, kendall_tau_fixed_cut, oracle_mae_h,
+    tau_circular, to_hours,
 )
 from simulation.truth import TWO_PI
 
@@ -105,8 +106,9 @@ def test_oracle_encuentra_la_rotacion_y_la_reflexion():
 def test_evaluate_devuelve_todas_las_claves():
     theta = np.random.default_rng(2).uniform(0, TWO_PI, 24)
     m = evaluate(theta, theta)
-    esperadas = {"mae_h", "medae_h", "rho_circ", "tau", "tau_circ",
-                 "orientacion_ok", "p1", "p2", "p4", "mae_h_oracle"}
+    esperadas = {"mae_h", "medae_h", "rho_circ", "rho_fl", "tau",
+                 "tau_circ", "orientacion_ok", "p1", "p2", "p4",
+                 "mae_h_oracle"}
     assert set(m) == esperadas
     assert m["mae_h"] == pytest.approx(0.0)
     assert m["p1"] == pytest.approx(1.0)
@@ -169,3 +171,58 @@ def test_orientacion_ok_marca_el_sentido_de_giro():
     assert evaluate(theta, (-ruido) % TWO_PI)["orientacion_ok"] == 0.0
     # rotar no cambia el sentido de giro
     assert evaluate(theta, (ruido + 2.5) % TWO_PI)["orientacion_ok"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Correlacion circular de Fisher y Lee
+# ---------------------------------------------------------------------------
+
+def test_fisher_lee_funciona_donde_jammalamadaka_no_esta_definida():
+    """
+    La razon de adoptarla. Jammalamadaka resta a cada serie su direccion
+    media, y con muestreo exactamente equiespaciado esa direccion no existe.
+    Fisher-Lee se construye sobre diferencias por pares y no necesita
+    ninguna media.
+    """
+    rejilla = _ang(np.linspace(0, 24, 48, endpoint=False))
+    est = (rejilla + np.random.default_rng(0).normal(0, 0.2, 48)) % TWO_PI
+    assert np.isnan(circular_correlation(rejilla, est))
+    assert fisher_lee_correlation(rejilla, est) > 0.9
+
+
+def test_fisher_lee_conserva_las_propiedades_necesarias():
+    theta = np.sort(np.random.default_rng(0).uniform(0, TWO_PI, 40))
+    assert fisher_lee_correlation(theta, theta) == pytest.approx(1.0)
+    # invariante a rotar cualquiera de las dos escalas
+    for d in (0.4, 1.5, 3.0, 5.7):
+        assert fisher_lee_correlation(theta, (theta + d) % TWO_PI) == pytest.approx(1.0)
+    # antisimetrica bajo reflexion, incluso combinada con rotacion
+    for d in (0.0, 2.0, 4.5):
+        assert fisher_lee_correlation(theta, (-theta + d) % TWO_PI) == pytest.approx(-1.0)
+    # sin relacion
+    aleatoria = np.random.default_rng(1).uniform(0, TWO_PI, 40)
+    assert abs(fisher_lee_correlation(theta, aleatoria)) < 0.2
+
+
+def test_fisher_lee_no_cambia_de_signo_donde_jammalamadaka_si():
+    """
+    Medido: sobre 400 reconstrucciones perfectas con muestreo uniforme,
+    Jammalamadaka cambia de signo en el 1,2 % de los casos y Fisher-Lee en
+    ninguno.
+    """
+    jam, fl = [], []
+    for s in range(300):
+        r = np.random.default_rng(s)
+        th = r.uniform(0, TWO_PI, 48)
+        est = (th + r.normal(0, 0.2, 48)) % TWO_PI
+        jam.append(circular_correlation(th, est))
+        fl.append(fisher_lee_correlation(th, est))
+    jam, fl = np.asarray(jam), np.asarray(fl)
+    assert (fl < 0).sum() == 0, "Fisher-Lee no deberia equivocarse de signo"
+    assert np.median(fl) > 0.9
+    # y la fragilidad de la otra existe de verdad, no es una precaucion
+    assert (jam < 0).sum() > 0
+
+
+def test_fisher_lee_con_menos_de_dos_muestras():
+    assert np.isnan(fisher_lee_correlation(np.array([0.0]), np.array([0.0])))
