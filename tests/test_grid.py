@@ -111,6 +111,25 @@ def test_el_eje_de_senal_ruido_arranca_donde_hay_senal():
     assert sum(1 for s in SNR_NIVELES if 1.0 <= s <= 2.0) >= 3
 
 
+def test_bloque_sin_ruido_es_el_factorial_de_los_tres_factores():
+    """
+    Verificacion de que el pipeline funciona con datos perfectos. Es el
+    factorial n x muestreo x omega, sin eje de senal-ruido porque aqui no
+    aplica. Cualquier error residual no puede venir del ruido.
+    """
+    from simulation.grid import SIGMA_SIN_RUIDO
+    celdas = build_grid("sin_ruido", reps=1)
+    assert len(celdas) == 3 * 3 * 3
+    assert {c.cfg.sigma for c in celdas} == {SIGMA_SIN_RUIDO}
+    assert {c.cfg.n_samples for c in celdas} == {24, 48, 96}
+    assert {c.cfg.sampling for c in celdas} == {"uniforme", "agrupado", "hueco"}
+    assert {c.cfg.omega for c in celdas} == {0.1, 0.5, 0.9}
+    # sigma no es 0 exacto: con 0 los genes de fondo quedan constantes y el
+    # preprocesado los elimina, cambiando dos cosas a la vez
+    assert SIGMA_SIN_RUIDO > 0.0
+    assert all(c.cfg.snr > 1e5 for c in celdas)
+
+
 def test_bloque_desconocido_falla():
     with pytest.raises(ValueError, match="Bloque desconocido"):
         build_grid("inventado", reps=1)

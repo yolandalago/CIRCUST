@@ -57,8 +57,15 @@ METODOS_RESUMEN: list[RobustConfig] = [
     RobustConfig(robust_method="aggregate", aggregation="tsp3", consensus_scale="cire"),
 ]
 
+# Ruido del bloque de verificacion. No es 0 exacto a proposito: con sigma=0
+# los genes de fondo quedan constantes y el preprocesado los elimina, con lo
+# que se cambiarian dos cosas a la vez, el ruido y la composicion de la
+# matriz. Con 1e-6 el ruido es despreciable y el fondo se conserva. Medido:
+# las dos variantes dan los mismos resultados en las 27 celdas.
+SIGMA_SIN_RUIDO = 1e-6
+
 BLOQUES = (
-    "piloto", "principal", "regularizacion", "agregacion",
+    "sin_ruido", "piloto", "principal", "regularizacion", "agregacion",
     "gcore", "invariancia", "computacional",
 )
 
@@ -154,6 +161,25 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
     """Todas las celdas de un bloque, con sus replicas."""
     por_defecto = RobustConfig()
     celdas: list[Cell] = []
+
+    if bloque == "sin_ruido":
+        # Verificacion de que el pipeline reconstruye el orden cuando los
+        # datos son perfectos. Factorial completo de los tres factores del
+        # bloque principal, sin el eje de senal-ruido, que aqui no aplica.
+        # Cualquier error residual no puede venir del ruido, asi que aisla
+        # los sesgos del propio algoritmo.
+        for n in N_NIVELES:
+            for muestreo in MUESTREOS:
+                for omega in OMEGAS:
+                    # amplitud 1 y sigma 1e-6, o sea A/sigma = 1e6. Ojo:
+                    # _cfg calcula amplitude = snr * sigma, asi que el
+                    # primer argumento es el cociente, no la amplitud.
+                    cfg = _cfg(n, muestreo, omega, 1.0 / SIGMA_SIN_RUIDO,
+                               sigma=SIGMA_SIN_RUIDO)
+                    for rep in range(reps):
+                        celdas.append(Cell(bloque, _con_semilla(bloque, cfg, rep),
+                                           GCORE_CENTRAL, "base", por_defecto, rep))
+        return celdas
 
     if bloque == "piloto":
         for snr in SNR_NIVELES:
