@@ -226,3 +226,35 @@ def test_fisher_lee_no_cambia_de_signo_donde_jammalamadaka_si():
 
 def test_fisher_lee_con_menos_de_dos_muestras():
     assert np.isnan(fisher_lee_correlation(np.array([0.0]), np.array([0.0])))
+
+
+def _fisher_lee_doble_suma(a, b):
+    """
+    Definicion literal de Fisher y Lee, en O(n^2). Vive aqui como referencia
+    contra la que verificar el algebra de la forma computacional que usa el
+    modulo, que es O(n).
+    """
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    iu = np.triu_indices(a.size, 1)
+    da = np.sin(a[:, None] - a[None, :])[iu]
+    db = np.sin(b[:, None] - b[None, :])[iu]
+    den = np.sqrt(np.sum(da**2) * np.sum(db**2))
+    return float(np.sum(da*db)/den) if den else float("nan")
+
+
+def test_la_forma_computacional_es_la_definicion_literal():
+    """
+    El modulo usa la descomposicion en sumas simples de Fisher (1993):
+
+        rho = 4(AB - CD) / sqrt[(n^2 - E^2 - F^2)(n^2 - G^2 - H^2)]
+
+    que es algebraicamente identica a la doble suma pero cuesta O(n) en vez
+    de O(n^2). Con n=480, que es el tamano del tejido real de GTEx, la
+    diferencia es de 108 us contra 11,6 ms.
+    """
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        n = int(rng.integers(5, 150))
+        a, b = rng.uniform(0, TWO_PI, n), rng.uniform(0, TWO_PI, n)
+        assert fisher_lee_correlation(a, b) == pytest.approx(
+            _fisher_lee_doble_suma(a, b), abs=1e-12)

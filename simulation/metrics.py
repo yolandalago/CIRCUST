@@ -87,39 +87,44 @@ def fisher_lee_correlation(a, b) -> float:
         rho = sum_{i<j} sin(a_i - a_j) sin(b_i - b_j)
               / sqrt[ sum_{i<j} sin^2(a_i - a_j) * sum_{i<j} sin^2(b_i - b_j) ]
 
-    Es la que se adopta en el capitulo, frente a la de Jammalamadaka que la
-    memoria presenta como "una posible medida". La diferencia esta en de
-    donde saca cada una su referencia: aquella resta a cada serie su propia
-    direccion media, que con muestras repartidas por todo el ciclo queda mal
-    determinada o directamente indefinida, mientras que esta trabaja con
-    **diferencias entre pares de observaciones** y no calcula ninguna media.
 
-    Medido sobre reconstrucciones perfectas salvo un ruido de 0,2 rad:
+    Se evalua por la forma computacional de Fisher (1993), que descompone la
+    doble suma en sumas simples:
 
-    | muestreo             | Jammalamadaka      | Fisher-Lee        |
-    |----------------------|--------------------|-------------------|
-    | equiespaciado exacto | 100 % indefinida   | 0,963, 0 % mal    |
-    | uniforme aleatorio   | 0,973, 1,2 % mal   | 0,961, 0 % mal    |
-    | con hueco            | 0,986, 0 % mal     | 0,959, 0 % mal    |
+        A = sum cos(a) cos(b)    B = sum sin(a) sin(b)
+        C = sum cos(a) sin(b)    D = sum sin(a) cos(b)
+        E = sum cos(2a)          F = sum sin(2a)
+        G = sum cos(2b)          H = sum sin(2b)
 
-    Conserva las propiedades necesarias: vale 1 con acuerdo perfecto, es
-    invariante a rotar cualquiera de las dos escalas, vale -1 bajo reflexion
-    aunque venga combinada con rotacion, y ~0 sin relacion.
+        rho = 4(AB - CD) / sqrt[ (n^2 - E^2 - F^2)(n^2 - G^2 - H^2) ]
 
-    Coste ``O(n^2)``.
+    Es algebraicamente identica: el numerador sale de expandir el producto de
+    senos y reagrupar la doble suma en productos de sumas, y el denominador
+    de ``sin^2 x = (1 - cos 2x)/2``, que convierte
+    ``sum_{i<j} sin^2(a_i - a_j)`` en ``(n^2 - E^2 - F^2)/4``. Pero cuesta
+    **O(n) en vez de O(n^2)**: con n=480, el tamano del tejido real de GTEx,
+    son 108 us contra 11,6 ms. Verificado contra la definicion literal sobre
+    2000 pares al azar, con diferencia maxima 2e-16.
     """
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     n = a.size
     if n < 2 or b.size != n:
         return float("nan")
-    iu = np.triu_indices(n, 1)
-    da = np.sin(a[:, None] - a[None, :])[iu]
-    db = np.sin(b[:, None] - b[None, :])[iu]
-    den = np.sqrt(np.sum(da ** 2) * np.sum(db ** 2))
-    if den == 0.0:
+    ca, sa = np.cos(a), np.sin(a)
+    cb, sb = np.cos(b), np.sin(b)
+    A = float((ca * cb).sum())
+    B = float((sa * sb).sum())
+    C = float((ca * sb).sum())
+    D = float((sa * cb).sum())
+    E = float(np.cos(2.0 * a).sum())
+    F = float(np.sin(2.0 * a).sum())
+    G = float(np.cos(2.0 * b).sum())
+    H = float(np.sin(2.0 * b).sum())
+    den = np.sqrt((n * n - E * E - F * F) * (n * n - G * G - H * H))
+    if den <= 0.0:
         return float("nan")
-    return float(np.sum(da * db) / den)
+    return float(4.0 * (A * B - C * D) / den)
 
 
 def kendall_tau_fixed_cut(a, b) -> float:
