@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from simulation.analyze import (
-    MEDIDAS, tabla_agregacion, tabla_gcore, tabla_principal,
+    MEDIDAS, tabla_agregacion, tabla_atlas, tabla_gcore, tabla_principal,
     tabla_regularizacion, tabla_sin_ruido,
 )
 
@@ -19,6 +19,8 @@ def _fila(**kw):
         orientacion_ok=1.0, p1=0.4, p2=0.7, p4=0.9, mae_h_oracle=0.5,
         r2_anchor=0.8, pares_ok=1.0, evidencia=1.7, desacuerdo_K=0.01,
         n_top=100, t_total_s=5.0,
+        atlas_rmse_curva=0.3, atlas_err_pico_sd_h=1.0,
+        atlas_omega_sesgo=-0.2, atlas_vpp=0.95,
     )
     base.update(kw)
     return base
@@ -35,7 +37,11 @@ def _falso():
                             bloque=bloque, fmm_method=fmm, sampling=mu,
                             omega=w, snr=snr, rep=rep,
                             # stabilized es 0,5 h mejor en el falso
-                            medae_h=1.5 if fmm == "base" else 1.0))
+                            medae_h=1.5 if fmm == "base" else 1.0,
+                            # y recupera mejor la onda por gen
+                            atlas_rmse_curva=0.4 if fmm == "base" else 0.2,
+                            atlas_omega_sesgo=(-0.30 if fmm == "base"
+                                               else -0.05)))
     for prop in (0.01, 0.20):
         for metodo in ("best_k", "aggregate"):
             for rep in range(3):
@@ -143,3 +149,43 @@ def test_no_se_escriben_figuras_vacias(tmp_path):
     with pytest.raises(ValueError, match="no hay datos"):
         figura_snr(solo_sin_ruido, tmp_path / "vacia.png")
     assert not (tmp_path / "vacia.png").exists()
+
+
+def test_tabla_atlas_separa_los_dos_metodos_en_niveles():
+    """
+    La tabla pareada da la diferencia, que es la que tiene potencia. Esta da
+    los valores absolutos, sin los cuales no se puede decir si el atlas es
+    utilizable o solo menos malo.
+    """
+    t = tabla_atlas(_falso())
+    assert "fmm_method" in t.index.names
+    metodos = t.index.get_level_values("fmm_method").unique()
+    assert set(metodos) == {"base", "stabilized"}
+    col = ("atlas_rmse_curva", "mediana")
+    base = t.xs("base", level="fmm_method")[col]
+    stab = t.xs("stabilized", level="fmm_method")[col]
+    assert (stab.values < base.values).all()
+
+
+def test_tabla_atlas_descarta_las_celdas_con_la_orientacion_invertida():
+    """
+    Una escala reflejada da un atlas especular, con el error de pico repartido
+    por todo el ciclo. Promediarlo junto a los aciertos mezcla dos regimenes
+    distintos en vez de dos calidades.
+    """
+    df = _falso()
+    malas = df["bloque"].isin(("principal", "regularizacion")) & (df["rep"] == 0)
+    df.loc[malas, "orientacion_ok"] = 0.0
+    df.loc[malas, "atlas_rmse_curva"] = 99.0
+
+    t = tabla_atlas(df)
+    assert t[("atlas_rmse_curva", "mediana")].max() < 1.0
+
+
+def test_la_tabla_pareada_lleva_las_medidas_del_atlas():
+    """Es el bloque donde base y estabilizado de verdad se diferencian."""
+    t = tabla_regularizacion(_falso())
+    assert ("delta_atlas_rmse_curva", "mediana") in t.columns
+    assert ("delta_atlas_omega_sesgo", "mediana") in t.columns
+    # el estabilizado recupera mejor la onda: la delta tiene que ser negativa
+    assert (t[("delta_atlas_rmse_curva", "mediana")] < 0).all()

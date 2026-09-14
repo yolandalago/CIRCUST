@@ -275,6 +275,7 @@ def _build_atlas(
     lambda_star:    float | None,
     fmm_method:     str,
     cfg:            dict,
+    n_jobs:         int | None = None,
 ) -> pd.DataFrame:
     """
     Construye la tabla [M^TOP] del atlas circadiano del tejido
@@ -324,7 +325,10 @@ def _build_atlas(
         from circust.top_genes import _fit_fmm_one, _fit_fmm_one_stab
 
         rows_mat = top_matrix_final.loc[top_names].values.astype(np.float64)
-        n_jobs   = os.cpu_count() or 1
+        # ``n_jobs`` explicito para el estudio de simulacion, que paraleliza a
+        # nivel de celda: sin esto cada celda abriria un pool del tamano de la
+        # maquina dentro de otro pool del mismo tamano.
+        n_jobs   = n_jobs if n_jobs is not None else (os.cpu_count() or 1)
 
         if fmm_method == "base":
             ag, og, nr = (cfg["fmm_alpha_grid"], cfg["fmm_omega_grid"], cfg["fmm_reps"])

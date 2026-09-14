@@ -53,6 +53,22 @@ MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "tau_circ", "rho_fl", "rho_circ",
 # Proporciones, se agregan con media porque son tasas.
 TASAS = ["orientacion_ok"]
 
+# Las cuatro del atlas que van a las tablas del capitulo. El CSV guarda
+# bastantes mas, pero cada una de estas responde a una pregunta distinta:
+#
+#   resumen       atlas_rmse_curva      libre de parametrizacion
+#   interpretable atlas_err_pico_sd_h   en horas
+#   mecanismo     atlas_omega_sesgo     por que el estabilizado mejora
+#   practica      atlas_vpp             cuantos genes del atlas son ritmicos
+#
+# Del error de pico se lleva la DISPERSION y no la media: el pico no tiene
+# sesgo sistematico una vez descontado el giro global (medias de +0,00 y
+# -0,00 h a A/sigma=4), asi que todo el error esta en la dispersion entre
+# genes. De omega pasa lo contrario, ahi lo que hay es sesgo (-0,314 con el
+# base contra -0,039 con el estabilizado a n=24 y A/sigma=1).
+MEDIDAS_ATLAS = ["atlas_rmse_curva", "atlas_err_pico_sd_h",
+                 "atlas_omega_sesgo", "atlas_vpp"]
+
 
 def _con_nivel(tabla: pd.DataFrame, columnas: list[str],
                nivel: str) -> pd.DataFrame:
@@ -123,6 +139,12 @@ def tabla_regularizacion(df: pd.DataFrame) -> pd.DataFrame:
     despues se resume. Promediar primero y restar despues perderia toda la
     potencia del diseno pareado, que es la razon de que los dos bloques
     compartan semilla de generacion.
+
+    Lleva tambien las medidas del atlas, que son las que de verdad separan a
+    los dos metodos: el orden de muestras sale de una SVD sobre los genes
+    nucleares donde el FMM no interviene, asi que sobre el orden base y
+    estabilizado son identicos por construccion y compararlos ahi seria
+    comparar dos nombres del mismo calculo.
     """
     clave = ["n_samples", "sampling", "omega", "snr", "rep"]
     base = df[(df["bloque"] == "principal") & (df["status"] == "ok")]
@@ -134,7 +156,7 @@ def tabla_regularizacion(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("el emparejamiento P contra F no cuadra")
 
     columnas = []
-    for m in MEDIDAS + TASAS:
+    for m in MEDIDAS + TASAS + MEDIDAS_ATLAS:
         a, b = f"{m}_base", f"{m}_stab"
         if a in par.columns and b in par.columns:
             par[f"delta_{m}"] = par[b] - par[a]
@@ -145,6 +167,41 @@ def tabla_regularizacion(df: pd.DataFrame) -> pd.DataFrame:
     iqr   = _con_nivel(g[columnas].quantile(0.75) - g[columnas].quantile(0.25),
                        columnas, "iqr")
     return pd.concat([tabla, iqr], axis=1).sort_index(axis=1)
+
+
+def tabla_atlas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calidad del atlas en NIVELES, base al lado de estabilizado.
+
+    ``tabla_regularizacion`` da la diferencia pareada, que es la que tiene
+    potencia estadistica, pero una diferencia sola no dice si el atlas es
+    utilizable. Esta tabla da los valores absolutos para poder decir, por
+    ejemplo, que a A/sigma=4 el error de pico esta por debajo de la hora con
+    los dos metodos y que la diferencia, aunque significativa, no cambia
+    ninguna conclusion biologica.
+
+    Solo se resumen las filas con la orientacion bien resuelta. Una escala
+    reflejada da un atlas especular, con errores de pico repartidos por todo
+    el ciclo (dispersion de 6,5 h, o sea ninguna informacion), y mezclarlos
+    con los aciertos no promedia dos calidades sino dos regimenes distintos.
+    La fraccion excluida ya es un resultado por si misma y sale en
+    ``orientacion_ok`` de las demas tablas.
+    """
+    g = df[df["bloque"].isin(("principal", "regularizacion"))]
+    g = g[(g["status"] == "ok") & (g["orientacion_ok"] == 1.0)]
+    if g.empty:
+        raise ValueError(
+            "no hay filas con orientacion resuelta en principal ni en "
+            "regularizacion"
+        )
+    medidas = [m for m in MEDIDAS_ATLAS if m in g.columns]
+    por = ["snr", "omega", "fmm_method"]
+    gr = g.groupby(por)
+    tabla = _con_nivel(gr[medidas].median(), medidas, "mediana")
+    iqr   = _con_nivel(gr[medidas].quantile(0.75) - gr[medidas].quantile(0.25),
+                       medidas, "iqr")
+    tabla[("n_celdas", "")] = gr.size()
+    return pd.concat([tabla], axis=1).sort_index(axis=1)
 
 
 def tabla_agregacion(df: pd.DataFrame) -> pd.DataFrame:
@@ -310,6 +367,7 @@ def main() -> None:
         "sin_ruido":      tabla_sin_ruido,
         "principal":      tabla_principal,
         "regularizacion": tabla_regularizacion,
+        "atlas":          tabla_atlas,
         "agregacion":     tabla_agregacion,
         "gcore":          tabla_gcore,
         "invariancia":    tabla_invariancia,

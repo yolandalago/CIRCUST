@@ -16,8 +16,17 @@ Diferencias deliberadas frente a ``run_pipeline.py``
    la Etapa 4, que ``run_pipeline.py`` deja con los pares por defecto. Sin
    esto la Etapa 4 buscaria ARNTL, DBP y CRY1, que no existen aqui.
 3. ``n_jobs=1`` en todas partes: se paraleliza a nivel de celda.
-4. No se construye el atlas. El estudio evalua ordenes de muestras.
-5. Se recogen cuatro indicadores observables sin la verdad, ver mas abajo.
+4. Se recogen cuatro indicadores observables sin la verdad, ver mas abajo.
+
+El atlas
+--------
+Se construye con el mismo ``_build_atlas`` de ``run_pipeline``, no con una
+copia, porque el bloque de regularizacion lo necesita: el FMM estabilizado
+**no puede** cambiar el orden de muestras, que sale de una SVD sobre los
+genes nucleares donde el FMM no interviene en ningun paso. Donde si cambia
+las cosas es en los parametros por gen, y eso es lo que el atlas publica.
+Comparar base contra estabilizado sobre el orden seria compararlos donde son
+identicos por construccion.
 
 Indicadores observables
 -----------------------
@@ -55,7 +64,7 @@ from circust.robust_order  import RobustOrderEstimator
 from circust.synchronizer  import CircularSynchronizer
 from circust.top_genes     import TopGeneSelector
 
-from run_pipeline import DEFAULT_CONFIG   # decision 1: no se redeclara
+from run_pipeline import DEFAULT_CONFIG, _build_atlas   # no se redeclaran
 
 from simulation.truth import TWO_PI, SimulationTruth
 
@@ -118,6 +127,7 @@ class Stage4Result:
     theta_hat:       pd.Series     # indexada por nombre de muestra
     desacuerdo_K:    float
     direction_flips: int
+    atlas:           pd.DataFrame | None = None
 
 
 @dataclass
@@ -133,6 +143,7 @@ class RunResult:
     evidencia:       float
     desacuerdo_K:    float
     direction_flips: int
+    atlas:           pd.DataFrame | None = None
 
 
 def _diagnostico_pares(
@@ -314,6 +325,7 @@ def run_stage_4(
     truth:      SimulationTruth,
     robust_cfg: RobustConfig,
     fmm_method: str = "base",
+    con_atlas:  bool = True,
 ) -> Stage4Result:
     """
     Etapa 4: estimacion robusta del orden a partir del estado intermedio.
@@ -359,11 +371,28 @@ def run_stage_4(
     nombres = [state.sample_names[i] for i in resultado.sample_order]
     fases   = np.asarray(resultado.circular_scale, dtype=float) % TWO_PI
 
+    atlas = None
+    if con_atlas:
+        # n_jobs=1: el estudio paraleliza a nivel de celda, y con aggregate
+        # esta llamada re-ajusta los genes TOP sobre el orden consenso.
+        atlas = _build_atlas(
+            method_used    = resultado.method_used,
+            selected_fmm   = resultado.selected_fmm,
+            top_matrix     = state.top_matrix,
+            sample_order   = resultado.sample_order,
+            circular_scale = resultado.circular_scale,
+            lambda_star    = state.lambda_star,
+            fmm_method     = fmm_method,
+            cfg            = cfg,
+            n_jobs         = 1,
+        )
+
     flips = np.asarray(resultado.direction_flipped)
     return Stage4Result(
         theta_hat       = pd.Series(fases, index=nombres, name="theta_hat"),
         desacuerdo_K    = _desacuerdo_entre_repeticiones(resultado.circular_scales),
         direction_flips = int(flips.sum()) if flips.size else 0,
+        atlas           = atlas,
     )
 
 
@@ -373,12 +402,13 @@ def run_full(
     n_core_declared: int,
     robust_cfg:      RobustConfig,
     fmm_method:      str = "base",
+    con_atlas:       bool = True,
 ) -> RunResult:
     """Pipeline completo sobre una matriz sintetica."""
     estado = run_stages_0_3(matrix, truth, n_core_declared, fmm_method)
 
     t = time.perf_counter()
-    etapa4 = run_stage_4(estado, truth, robust_cfg, fmm_method)
+    etapa4 = run_stage_4(estado, truth, robust_cfg, fmm_method, con_atlas)
     estado.timing["robust_order"] = time.perf_counter() - t
     estado.timing["total"] = sum(estado.timing.values())
 
@@ -392,4 +422,5 @@ def run_full(
         evidencia       = estado.evidencia,
         desacuerdo_K    = etapa4.desacuerdo_K,
         direction_flips = etapa4.direction_flips,
+        atlas           = etapa4.atlas,
     )

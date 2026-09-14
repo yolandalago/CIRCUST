@@ -143,3 +143,45 @@ def test_la_evidencia_cae_cuando_los_core_se_ajustan_mal():
 
     fuerte, debil = evidencia_de(4.0), evidencia_de(0.25)
     assert fuerte > debil or np.isnan(debil)
+
+
+# ---------------------------------------------------------------------------
+# Atlas: calidad del ajuste por gen
+# ---------------------------------------------------------------------------
+
+def test_run_full_publica_el_atlas(celda_pequena):
+    """
+    El atlas es lo que se compara entre FMM base y estabilizado, porque el
+    orden de muestras sale de una SVD donde el FMM no interviene.
+    """
+    X, truth = celda_pequena
+    res = run_full(X, truth, 20, RobustConfig(n_reps=3))
+    assert res.atlas is not None
+    assert len(res.atlas) == res.n_top
+    for c in ("gene_name", "M", "amplitude", "alpha", "beta", "omega"):
+        assert c in res.atlas.columns
+    # todos los genes del atlas existen en la verdad, que es lo que permite
+    # compararlos gen a gen
+    assert set(res.atlas["gene_name"]) <= set(truth.gene_params.index)
+
+
+def test_las_metricas_del_atlas_salen_en_rango(celda_pequena):
+    from simulation.atlas import atlas_metrics
+
+    X, truth = celda_pequena
+    res = run_full(X, truth, 20, RobustConfig(n_reps=3))
+    m = atlas_metrics(res.atlas, truth.gene_params, quitar_giro=True)
+
+    assert 0.0 <= m["atlas_vpp"] <= 1.0
+    assert m["atlas_n_evaluados"] > 0
+    # con A/sigma = 4 el ajuste tiene que ser bueno, si no la medida no
+    # discriminaria nada mas abajo
+    assert m["atlas_rmse_curva"] < 0.5
+    assert abs(m["atlas_err_pico_h"]) < 3.0
+
+
+def test_se_puede_pedir_el_pipeline_sin_atlas(celda_pequena):
+    """Valvula de escape: con aggregate el atlas se re-ajusta y cuesta."""
+    X, truth = celda_pequena
+    res = run_full(X, truth, 20, RobustConfig(n_reps=3), con_atlas=False)
+    assert res.atlas is None

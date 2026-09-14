@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from simulation.atlas import COLUMNAS_ATLAS, atlas_metrics
 from simulation.generate import generate_dataset
 from simulation.grid import BLOQUES, Cell, build_grid
 from simulation.metrics import evaluate
@@ -50,6 +51,9 @@ COLUMNAS: list[str] = [
     # observables sin la verdad, para calibrar el aviso de fase absoluta
     "r2_anchor", "pares_ok", "evidencia", "desacuerdo_K",
     "n_top", "n_outliers", "n_evaluadas", "direction_flips",
+    # calidad del atlas: es lo que separa el FMM base del estabilizado, que
+    # sobre el orden de muestras son identicos por construccion
+    *COLUMNAS_ATLAS,
     # tiempos
     "t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s", "t_robust_s",
     "t_total_s",
@@ -135,10 +139,14 @@ def run_cell_group(
             fila["n_evaluadas"]     = len(theta_hat)
             fila["desacuerdo_K"]    = etapa4.desacuerdo_K
             fila["direction_flips"] = etapa4.direction_flips
+            # quitar_giro: el giro global de la escala es error de anclaje, ya
+            # medido por mae_h, y dejarlo dentro taparia la calidad del ajuste
+            fila.update(atlas_metrics(etapa4.atlas, truth.gene_params,
+                                      quitar_giro=True))
         except Exception as exc:                  # noqa: BLE001
             fila["status"] = "fallo"
             fila["error"] = f"{type(exc).__name__}: {exc}"
-            for clave in _METRICAS:
+            for clave in (*_METRICAS, *COLUMNAS_ATLAS):
                 fila[clave] = np.nan
         fila["n_top"]          = estado.n_top
         fila["n_outliers"]     = estado.n_outliers
