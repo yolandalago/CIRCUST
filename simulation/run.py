@@ -59,6 +59,11 @@ COLUMNAS: list[str] = [
     "t_total_s",
 ]
 
+# Filas que se acumulan antes de escribir. Un bloque tarda horas, asi que el
+# CSV se va volcando por lotes en vez de al final: lo que se pierde en una
+# interrupcion es a lo sumo un lote, y ``existing_ids`` reanuda solo.
+LOTE_ESCRITURA = 50
+
 _METRICAS = ("mae_h", "medae_h", "rho_circ", "rho_fl", "tau", "tau_circ",
              "orientacion_ok", "p1", "p2", "p4", "mae_h_oracle")
 
@@ -221,25 +226,45 @@ def main() -> None:
         return
 
     t0 = time.perf_counter()
-    resultados = Parallel(n_jobs=args.jobs, verbose=10)(
+    # Generador, no lista: las filas se escriben segun llegan. Un bloque tarda
+    # horas y antes el CSV no se tocaba hasta el final, de modo que cualquier
+    # interrupcion tiraba todo el trabajo. Ahora solo se pierde el ultimo lote
+    # y ``existing_ids`` reanuda por donde iba.
+    resultados = Parallel(n_jobs=args.jobs, verbose=10,
+                          return_as="generator_unordered")(
         delayed(run_cell_group)(cfg, n_core, fmm, metodos, bloque, rep)
         for bloque, cfg, n_core, fmm, rep, metodos in grupos
     )
+
+    n_filas = n_fallos = 0
+    cpu = 0.0
+    lote: list[dict] = []
+
+    def volcar() -> None:
+        nonlocal lote
+        if not lote:
+            return
+        df = pd.DataFrame(lote, columns=COLUMNAS)
+        df.to_csv(destino, mode="a", header=not destino.exists(), index=False)
+        lote = []
+
+    for grupo in resultados:
+        lote.extend(grupo)
+        n_filas += len(grupo)
+        n_fallos += sum(1 for f in grupo if f["status"] == "fallo")
+        cpu += sum(f["t_total_s"] for f in grupo
+                   if f["t_total_s"] == f["t_total_s"])   # descarta nan
+        if len(lote) >= LOTE_ESCRITURA:
+            volcar()
+    volcar()
     elapsed = time.perf_counter() - t0
 
-    filas = [f for grupo in resultados for f in grupo]
-    df = pd.DataFrame(filas, columns=COLUMNAS)
-    existia = destino.exists()
-    df.to_csv(destino, mode="a", header=not existia, index=False)
-
-    n_fallos = int((df["status"] == "fallo").sum())
-    print(f"\nEscritas {len(df)} filas en {destino}")
-    print(f"Fallos: {n_fallos} de {len(df)}")
+    print(f"\nEscritas {n_filas} filas en {destino}")
+    print(f"Fallos: {n_fallos} de {n_filas}")
     print(f"Tiempo de pared: {elapsed:.1f} s "
           f"({elapsed / max(len(grupos), 1):.2f} s por grupo)")
-    cpu = df["t_total_s"].sum()
     print(f"Tiempo de CPU acumulado: {cpu:.1f} s "
-          f"({cpu / max(len(df), 1):.2f} s por fila)")
+          f"({cpu / max(n_filas, 1):.2f} s por fila)")
 
 
 if __name__ == "__main__":

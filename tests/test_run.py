@@ -109,3 +109,48 @@ def test_los_metodos_comparten_las_etapas_0_a_3():
     assert len({f["n_top"] for f in filas}) == 1
     # y la configuracion del metodo queda registrada en su fila
     assert {f["selection_criterion"] for f in filas} >= {"r2_median", "medoid"}
+
+
+def test_el_csv_se_escribe_por_lotes_y_no_al_final(tmp_path, monkeypatch):
+    """
+    Un bloque tarda horas. Antes el CSV no se tocaba hasta que terminaba todo,
+    de modo que una interrupcion tiraba el trabajo entero. Se comprueba que
+    hay filas en disco antes de que acabe la ejecucion.
+    """
+    import simulation.run as run_mod
+
+    destino = tmp_path / "resultados.csv"
+    vistos: list[int] = []
+
+    # el Parallel falso no mira el contenido de los grupos, solo cuenta
+    grupos = [("sin_ruido", None, 10, "base", i, []) for i in range(6)]
+
+    def falso_parallel(*a, **kw):
+        assert kw.get("return_as") == "generator_unordered", (
+            "sin generador las filas no pueden escribirse segun llegan"
+        )
+        def corre(tareas):
+            for _ in tareas:
+                # cuantas filas hay en disco en este momento
+                vistos.append(
+                    sum(1 for _ in destino.open()) - 1 if destino.exists() else 0
+                )
+                yield [{c: None for c in run_mod.COLUMNAS}
+                       | {"status": "ok", "t_total_s": 1.0, "row_id": str(len(vistos))}]
+        return corre
+
+    monkeypatch.setattr(run_mod, "LOTE_ESCRITURA", 2)
+    monkeypatch.setattr(run_mod, "Parallel", falso_parallel)
+    monkeypatch.setattr(run_mod, "build_grid", lambda b, r: [])
+    monkeypatch.setattr(run_mod, "_agrupar", lambda c: grupos)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run.py", "--bloque", "sin_ruido", "--out", str(tmp_path)],
+    )
+    run_mod.main()
+
+    assert destino.exists()
+    assert sum(1 for _ in destino.open()) - 1 == 6
+    assert max(vistos) > 0, (
+        "el CSV seguia vacio al llegar al ultimo grupo, no se escribio por lotes"
+    )
