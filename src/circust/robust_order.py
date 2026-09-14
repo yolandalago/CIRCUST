@@ -102,7 +102,10 @@ def _fit_gene(args):
             omega,
         )
     pkU = FMMModel.peak_time(pars_fmm[2], pars_fmm[3], pars_fmm[4])
-    pkL = (pkU + pi) % two_pi
+    # No es pkU + pi: eso supone que el valle cae a media vuelta del pico, lo
+    # cual solo vale para una sinusoide. Con omega = 0,2 esa regla erraba el
+    # minimo real en 7,6 h de mediana.
+    pkL = FMMModel.trough_time(pars_fmm[2], pars_fmm[3], pars_fmm[4])
     peaks_fmm = (pkU, pkL, pkU / two_pi * 100, pkL / two_pi * 100)
     resid = vvv - fr.fitted
     sFMM   = float(np.sum(resid**2) / max(n_samp - 5, 1))

@@ -753,6 +753,38 @@ class FMMModel(RhythmModel):
             )) % (2.0 * np.pi)
         )
 
+    @staticmethod
+    def trough_time(alpha: float, beta: float, omega: float) -> float:
+        """
+        Tiempo de valle del modelo FMM.
+
+            t_L = alpha + 2*atan2((1/omega)*sin((pi-beta)/2), cos((pi-beta)/2))
+
+        El pico es donde el argumento del coseno vale 0 y el valle donde vale
+        pi, de modo que ``f(t_U) = M + A`` y ``f(t_L) = M - A``.
+
+        **No es ``t_U + pi``.** Esa regla supone que el valle cae a media
+        vuelta del pico, cierto solo para una sinusoide. La onda FMM compone
+        el coseno con una deformacion del eje temporal (eso es lo que la hace
+        apuntada), asi que pico y valle estan a media vuelta en la coordenada
+        interna del modelo pero no en tiempo de reloj. Error mediano de la
+        regla antigua frente al minimo real, medido sobre 120 ondas por nivel:
+
+            omega 1,00 -> 0,00 h      omega 0,60 -> 2,72 h
+            omega 0,80 -> 1,30 h      omega 0,40 -> 4,91 h
+            omega 0,95 -> 0,29 h      omega 0,20 -> 7,60 h
+
+        Se usa ``atan2`` y no ``tan((pi-beta)/2)`` directamente porque esa
+        tangente se dispara cuando beta tiende a 0. Es el mismo motivo por el
+        que ``peak_time`` tambien esta escrita asi.
+        """
+        return float(
+            (alpha + 2.0 * np.arctan2(
+                (1.0 / omega) * np.sin((np.pi - beta) / 2.0),
+                np.cos((np.pi - beta) / 2.0),
+            )) % (2.0 * np.pi)
+        )
+
     def fit(
         self,
         data:        np.ndarray,

@@ -244,16 +244,21 @@ def _fit_fmm_one(
     alpha_grid: int,
     omega_grid: int,
     num_reps: int,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float, float]:
     """Ajusta FMM base a un unico gen. Devuelve ``(peak_time, omega, r2, A)``.
 
     Funcion pura a nivel de modulo para que ``joblib`` pueda serializarla
     hacia procesos worker (FMM base puede paralelizar con muchos genes).
 
-    Devuelve escalares y no el vector ``fitted``: este ultimo no lo consume
-    nadie y, con decenas de miles de genes, obliga a serializar de vuelta un
-    vector de n muestras por gen desde cada proceso worker. La amplitud, en
-    cambio, es necesaria para construir el atlas.
+    Devuelve ``(peak_time, omega, r2, A, M, alpha, beta)``. Los tres ultimos
+    se anaden al final para que los consumidores que indexan por posicion no
+    se rompan. Hacen falta para que el atlas pueda publicar los cinco
+    parametros del modelo: con solo (A, t_U, omega) la onda no queda
+    determinada, porque beta gobierna la asimetria entre subida y bajada.
+
+    No devuelve el vector ``fitted``: no lo consume nadie y, con decenas de
+    miles de genes, obliga a serializar de vuelta un vector de n muestras por
+    gen desde cada proceso worker.
     """
     model = FMMModel(
         length_alpha_grid=alpha_grid,
@@ -261,20 +266,22 @@ def _fit_fmm_one(
         num_reps=num_reps,
     )
     fr = model.fit(row, circ)
-    return fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"]
+    return (fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"],
+            fr.params["M"], fr.params["alpha"], fr.params["beta"])
 
 
 def _fit_fmm_one_stab(
     row:      np.ndarray,
     circ:     np.ndarray,
     stab_model: StabilizedFMMModel,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float, float]:
     """Ajusta FMM estabilizado reusando un ``StabilizedFMMModel`` ya preparado.
 
     Mismo formato de salida que :func:`_fit_fmm_one`.
     """
     fr = stab_model.fit(row, circ)
-    return fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"]
+    return (fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"],
+            fr.params["M"], fr.params["alpha"], fr.params["beta"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -712,11 +719,11 @@ class TopGeneSelector:
             row = expr_norm.loc[seed].values.astype(np.float64)
             if self.fmm_method == "stabilized":
                 # Reusa el StabilizedFMMModel cacheado en _fit_fmm_batch
-                pk, om, r2, _ = _fit_fmm_one_stab(
+                pk, om, r2, *_ = _fit_fmm_one_stab(
                     row, circ, self._cached_stab_model,
                 )
             else:
-                pk, om, r2, _ = _fit_fmm_one(
+                pk, om, r2, *_ = _fit_fmm_one(
                     row, circ,
                     self.fmm_length_alpha_grid,
                     self.fmm_length_omega_grid,

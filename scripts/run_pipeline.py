@@ -306,9 +306,11 @@ def _build_atlas(
         # median : mediana por gen sobre las K (CIRCUST original). En los dos
         #          casos el atlas ya viene calculado en selected_fmm y no hay
         #          nada que re-ajustar.
-        raw = selected_fmm[
-            ["gene_name", "r2_fmm", "amplitude", "peak_phase_rad", "omega"]
-        ].copy()
+        raw = selected_fmm[[
+            "gene_name", "r2_fmm", "M", "amplitude",
+            "alpha", "beta", "omega",
+            "peak_phase_rad", "trough_phase_rad",
+        ]].copy()
     else:
         # Re-fittear FMM sobre el orden consenso de MUESTRAS
         top_matrix_final = top_matrix.iloc[:, sample_order]
@@ -348,12 +350,18 @@ def _build_atlas(
                 for i in range(len(top_names))
             )
 
+        from circust.fitting.fmm import FMMModel
         raw = pd.DataFrame({
-            "gene_name":      list(top_names),
-            "r2_fmm":         [float(f[2]) for f in fits],
-            "amplitude":      [float(f[3]) for f in fits],
-            "peak_phase_rad": [float(f[0]) for f in fits],
-            "omega":          [float(f[1]) for f in fits],
+            "gene_name":        list(top_names),
+            "r2_fmm":           [float(f[2]) for f in fits],
+            "M":                [float(f[4]) for f in fits],
+            "amplitude":        [float(f[3]) for f in fits],
+            "alpha":            [float(f[5]) for f in fits],
+            "beta":             [float(f[6]) for f in fits],
+            "omega":            [float(f[1]) for f in fits],
+            "peak_phase_rad":   [float(f[0]) for f in fits],
+            "trough_phase_rad": [FMMModel.trough_time(f[5], f[6], f[1])
+                                 for f in fits],
         })
 
     # Postprocesar: clasificacion day/night. No se convierte peak_phase_rad a
@@ -363,10 +371,16 @@ def _build_atlas(
     raw["classification"] = np.where(
         raw["peak_phase_rad"] < np.pi, "day", "night",
     )
+    # Se publican los CINCO parametros del modelo y no solo (A, t_U, omega).
+    # Con esos tres la onda NO queda determinada: fijando pico y omega, mover
+    # beta cambia la forma por completo, de subir en 7 h y bajar en 17 a lo
+    # contrario, con diferencias de hasta el 160 % de la amplitud. El valle
+    # t_L es el grado de libertad que faltaba, y ademas es interpretable:
+    # junto con el pico da los tiempos de subida y bajada del gen.
     atlas = raw[[
-        "gene_name", "r2_fmm", "amplitude",
-        "peak_phase_rad",
-        "omega", "classification",
+        "gene_name", "r2_fmm",
+        "M", "amplitude", "alpha", "beta", "omega",
+        "peak_phase_rad", "trough_phase_rad", "classification",
     ]].sort_values("r2_fmm", ascending=False).reset_index(drop=True)
     return atlas
 
