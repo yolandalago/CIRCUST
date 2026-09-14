@@ -64,7 +64,7 @@ def test_tabla_principal_resume_por_los_factores():
     assert list(t.index.names) == ["sampling", "omega", "snr"]
     # una fila por combinacion de los tres factores del falso
     assert len(t) == 2 * 2 * 2
-    assert {"medae_h", "tau_circ", "orientacion_ok"} <= set(
+    assert {"medae_h", "abs_tau_circ", "orientacion_ok"} <= set(
         t.columns.get_level_values(0))
 
 
@@ -122,7 +122,7 @@ def test_tabla_sin_ruido_separa_orden_de_orientacion():
     assert set(t["omega"]) == {0.1, 0.9}
     buena = t[t.omega == 0.9].iloc[0]
     mala  = t[t.omega == 0.1].iloc[0]
-    assert buena[("tau_circ", "mediana")] == pytest.approx(1.0)
+    assert buena[("abs_tau_circ", "mediana")] == pytest.approx(1.0)
     assert buena[("orientacion_ok", "tasa")] == pytest.approx(1.0)
     assert mala[("orientacion_ok", "tasa")] == pytest.approx(0.0)
 
@@ -189,3 +189,37 @@ def test_la_tabla_pareada_lleva_las_medidas_del_atlas():
     assert ("delta_atlas_omega_sesgo", "mediana") in t.columns
     # el estabilizado recupera mejor la onda: la delta tiene que ser negativa
     assert (t[("delta_atlas_rmse_curva", "mediana")] < 0).all()
+
+
+def test_la_calidad_del_orden_se_resume_en_valor_absoluto():
+    """
+    ``tau_circ`` cambia de signo cuando el ciclo se recorre al reves, asi que
+    su signo dice la orientacion y su magnitud la calidad del orden. Son dos
+    preguntas distintas en una columna, y ``orientacion_ok`` ya se define como
+    ``tau_circ > 0``.
+
+    Cuatro replicas que recuperan el orden igual de bien, dos con el sentido
+    correcto y dos al reves, dan +0,8 +0,8 -0,8 -0,8. Resumido con signo sale
+    0,0, que se lee como "no se recupero nada" cuando la calidad real es 0,8
+    en las cuatro.
+    """
+    filas = [_fila(bloque="principal", rep=i, snr=2.0,
+                   tau_circ=s * 0.8, orientacion_ok=float(s > 0))
+             for i, s in enumerate([1, 1, -1, -1])]
+    t = tabla_principal(pd.DataFrame(filas))
+
+    assert ("abs_tau_circ", "mediana") in t.columns
+    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.8)
+    # el signo no se pierde, se reporta aparte como tasa
+    assert t[("orientacion_ok", "tasa")].iloc[0] == pytest.approx(0.5)
+    # y la columna con signo ya no aparece, para que nadie la lea como calidad
+    assert ("tau_circ", "mediana") not in t.columns
+
+
+def test_con_la_orientacion_siempre_acertada_las_dos_formas_coinciden():
+    """El arreglo no toca ninguna celda sana."""
+    filas = [_fila(bloque="principal", rep=i, snr=3.0,
+                   tau_circ=v, orientacion_ok=1.0)
+             for i, v in enumerate([0.90, 0.93, 0.95, 0.97])]
+    t = tabla_principal(pd.DataFrame(filas))
+    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.94)

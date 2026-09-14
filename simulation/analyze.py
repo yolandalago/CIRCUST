@@ -47,7 +47,26 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Medidas continuas, se agregan con mediana.
-MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "tau_circ", "rho_fl", "rho_circ", "tau",
+#
+# Va ``abs_tau_circ`` y no ``tau_circ``. ``tau_circ`` cambia de signo cuando el
+# ciclo se recorre al reves, de modo que su SIGNO y su MAGNITUD responden a dos
+# preguntas distintas: el signo dice la orientacion y la magnitud la calidad
+# del orden. De hecho ``orientacion_ok`` se define como ``tau_circ > 0``, asi
+# que el signo ya esta contado en su propia columna.
+#
+# Resumir el numero con signo mezcla las dos. Cuatro replicas que recuperan el
+# orden igual de bien, dos con el sentido correcto y dos al reves, dan
+# +0,8 +0,8 -0,8 -0,8 y mediana 0,0, que se lee como "no se recupero nada"
+# cuando la calidad real es 0,8 en las cuatro. Medido en la celda omega=0,1
+# con A/sigma=4: 106 replicas con mediana +0,294 y 74 reflejadas con mediana
+# -0,227 daban una mediana conjunta de +0,093, mientras que el oraculo decia
+# 1,85 h (un orden aleatorio da 5,4 h, medido sobre permutaciones).
+#
+# En valor absoluto las dos preguntas quedan separadas, una por columna, y no
+# se pierde nada. Donde la orientacion se acierta siempre las dos formas
+# coinciden hasta el ultimo decimal.
+MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "abs_tau_circ",
+           "rho_fl", "rho_circ", "tau",
            "p2", "r2_anchor", "evidencia", "desacuerdo_K", "n_top"]
 
 # Proporciones, se agregan con media porque son tasas.
@@ -78,9 +97,21 @@ def _con_nivel(tabla: pd.DataFrame, columnas: list[str],
     return salida
 
 
+def _derivadas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Columnas que se calculan de otras y por eso no ocupan sitio en el CSV.
+
+    ``abs_tau_circ`` es la calidad del orden al margen del sentido de giro.
+    Ver el comentario de ``MEDIDAS``.
+    """
+    if "tau_circ" in df.columns and "abs_tau_circ" not in df.columns:
+        return df.assign(abs_tau_circ=df["tau_circ"].abs())
+    return df
+
+
 def load(path: Path | str) -> pd.DataFrame:
     """Carga el CSV largo de resultados."""
-    return pd.read_csv(path)
+    return _derivadas(pd.read_csv(path))
 
 
 def _resumen(df: pd.DataFrame, por: list[str]) -> pd.DataFrame:
@@ -90,6 +121,7 @@ def _resumen(df: pd.DataFrame, por: list[str]) -> pd.DataFrame:
     Las filas con fallo no entran en las medianas pero si en el denominador
     de la tasa de fallo.
     """
+    df = _derivadas(df)
     fallo = df.groupby(por)["status"].apply(
         lambda s: float((s == "fallo").mean())
     )
@@ -146,6 +178,7 @@ def tabla_regularizacion(df: pd.DataFrame) -> pd.DataFrame:
     estabilizado son identicos por construccion y compararlos ahi seria
     comparar dos nombres del mismo calculo.
     """
+    df = _derivadas(df)
     clave = ["n_samples", "sampling", "omega", "snr", "rep"]
     base = df[(df["bloque"] == "principal") & (df["status"] == "ok")]
     stab = df[(df["bloque"] == "regularizacion") & (df["status"] == "ok")]
@@ -187,7 +220,8 @@ def tabla_atlas(df: pd.DataFrame) -> pd.DataFrame:
     La fraccion excluida ya es un resultado por si misma y sale en
     ``orientacion_ok`` de las demas tablas.
     """
-    g = df[df["bloque"].isin(("principal", "regularizacion"))]
+    g = _derivadas(df)
+    g = g[g["bloque"].isin(("principal", "regularizacion"))]
     g = g[(g["status"] == "ok") & (g["orientacion_ok"] == 1.0)]
     if g.empty:
         raise ValueError(
