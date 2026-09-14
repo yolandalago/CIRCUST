@@ -5,6 +5,27 @@ Un bloque es una lista de celdas, y una celda es una configuracion de
 generacion mas una configuracion de algoritmo mas un numero de replica. Las
 semillas se derivan de forma determinista de la celda, asi que cualquier fila
 del CSV se reproduce sola sin depender del orden de ejecucion.
+
+La rejilla unificada
+--------------------
+El bloque ``rejilla`` es el que evalua las tres aportaciones del TFG. Es un
+factorial de los factores de generacion, y sobre CADA celda y replica se
+corren las dos variantes del FMM (base y estabilizado) y los cinco metodos de
+resumen de las K repeticiones, todos sobre la misma matriz. Asi:
+
+- el contraste base contra estabilizado existe en todas las celdas, y ademas
+  por metodo de resumen,
+- el contraste entre metodos de resumen existe en todas las celdas, y ademas
+  por variante del FMM,
+- el tiempo de cada configuracion sale gratis, por etapa.
+
+Los antiguos bloques ``principal``, ``regularizacion``, ``agregacion`` y
+``gcore`` evaluaban cada mejora en un subconjunto de ejes distinto, con lo que
+no se podia responder, por ejemplo, si la agregacion ayuda con muestreo
+agrupado o si el estabilizado ayuda con pocos genes ritmicos. Esta rejilla
+los sustituye. ``sin_ruido`` e ``invariancia`` se mantienen como verificacion,
+y ``computacional`` es el bloque de R, que va aparte porque R es unas 20
+veces mas lento y necesita un proceso por celda.
 """
 from __future__ import annotations
 
@@ -18,30 +39,41 @@ from simulation.truth import SimConfig
 # que el eje de senal-ruido se realiza fijando sigma y moviendo la amplitud.
 SIGMA_BASE = 1.0
 
-# Niveles medidos en la Task 6 sobre 27 celdas piloto. Por debajo de
-# A/sigma = 1 el orden no se reconstruye (oraculo 3,3 a 3,9 h) y gastar
-# replicas ahi solo produce tasa de fallo. La calidad del orden satura en 1,5
-# (oraculo 0,44 h y ya no mejora) y la orientacion en 2, asi que la
-# transicion interesante esta entre 1 y 2 y se muestrea con tres niveles.
-# El 1,0 se conserva como celda de frontera de aplicabilidad.
-SNR_NIVELES = (1.0, 1.5, 2.0, 3.0, 4.0)
+# Niveles de A/sigma. Por debajo de 1 el orden no se reconstruye (oraculo 3,3
+# a 3,9 h, medido) y gastar replicas ahi solo produce tasa de fallo. La calidad
+# del orden satura en 1,5 y la orientacion en 2, asi que la transicion esta
+# entre 1 y 2 y se muestrea con tres niveles. El 4 es el regimen saturado. El
+# 3 se quito tras medir en la rejilla anterior que 3 y 4 son indistinguibles
+# en todas las medidas (medae 1,24 contra 1,17 h, orientacion 1,0 en ambos).
+SNR_NIVELES = (1.0, 1.5, 2.0, 4.0)
 
 N_NIVELES     = (24, 48, 96)
 MUESTREOS     = ("uniforme", "agrupado", "hueco")
 OMEGAS        = (0.1, 0.5, 0.9)
 GCORE_NIVELES = (10, 20, 30)
-PROP_NIVELES  = (0.01, 0.05, 0.20)
+FMM_METODOS   = ("base", "stabilized")
 
-# Celda central, referencia del piloto y de los bloques con eje propio.
+# Tamano de la matriz y proporcion de ritmicos, como eje conjunto. Lo que el
+# pipeline ve de verdad es cuantos genes ritmicos hay (el TOP satura en 100
+# genes) y cuanto fondo. El factorial completo de los dos ejes tendria celdas
+# redundantes, asi que se toman cinco combinaciones que cubren ritmicos en
+# {50, 200, 250, 1000} y, dentro, dos pares con los mismos 50 ritmicos y
+# distinto fondo (1000 x 0,05 y 5000 x 0,01), que aislan el efecto del numero
+# de genes por si solo. (1000, 0,01) es imposible: 10 ritmicos no alojan los
+# 30 genes core.
+GENES_PROP = (
+    (1000, 0.05),
+    (1000, 0.20),
+    (5000, 0.01),
+    (5000, 0.05),
+    (5000, 0.20),
+)
+
+# Celda central, referencia de los bloques de verificacion.
 N_CENTRAL        = 48
 MUESTREO_CENTRAL = "uniforme"
 OMEGA_CENTRAL    = 0.5
 GCORE_CENTRAL    = 20
-
-# El bloque de agregacion usa 5000 genes y no 1000. Con 1000 y prop 0,01 solo
-# habria 10 genes ritmicos, menos que los 30 core, y el generador no podria
-# alojarlos. Con 5000 el nivel mas bajo da 50 ritmicos, que si caben.
-GENES_AGREGACION = 5000
 
 # Marco estandar del bloque computacional, segun el parrafo de apertura del
 # capitulo: tiempos equiespaciados, ruido medio, ondas simetricas y
@@ -57,6 +89,10 @@ METODOS_RESUMEN: list[RobustConfig] = [
     RobustConfig(robust_method="aggregate", aggregation="tsp3", consensus_scale="cire"),
 ]
 
+# El metodo de referencia: es lo que hace CIRCUST tal cual esta en el codigo
+# antes de esta aportacion, y contra el se miden los demas.
+METODO_REFERENCIA = METODOS_RESUMEN[0]
+
 # Ruido del bloque de verificacion. No es 0 exacto a proposito: con sigma=0
 # los genes de fondo quedan constantes y el preprocesado los elimina, con lo
 # que se cambiarian dos cosas a la vez, el ruido y la composicion de la
@@ -65,8 +101,7 @@ METODOS_RESUMEN: list[RobustConfig] = [
 SIGMA_SIN_RUIDO = 1e-6
 
 BLOQUES = (
-    "sin_ruido", "sin_ruido_stab", "piloto", "principal", "regularizacion",
-    "agregacion", "gcore", "invariancia", "computacional",
+    "rejilla", "sin_ruido", "sin_ruido_stab", "invariancia", "computacional",
 )
 
 
@@ -133,7 +168,14 @@ def _cfg(
 
 
 def _con_semilla(bloque: str, cfg: SimConfig, rep: int) -> SimConfig:
-    """Fija la semilla de la celda a partir de su identidad de generacion."""
+    """
+    Fija la semilla de la celda a partir de su identidad de GENERACION.
+
+    La clave no lleva ni el FMM, ni el metodo de resumen, ni los core
+    declarados, porque ninguno de los tres cambia la matriz. Es lo que hace
+    que todas las variantes de una celda corran sobre datos identicos y las
+    comparaciones sean pareadas.
+    """
     clave = (
         f"n{cfg.n_samples}|{cfg.sampling}|w{cfg.omega}|A{cfg.amplitude}"
         f"|s{cfg.sigma}|g{cfg.n_genes}|p{cfg.prop_rhythmic}"
@@ -141,39 +183,49 @@ def _con_semilla(bloque: str, cfg: SimConfig, rep: int) -> SimConfig:
     return replace(cfg, seed=cell_seed(bloque, clave, rep))
 
 
-# El bloque de regularizacion tiene que generar exactamente las mismas
-# matrices que el principal, asi que ambos usan esta semilla de generacion.
-SEMILLA_COMPARTIDA = "principal"
-
-
-def _base_principal() -> list[SimConfig]:
-    """Las 135 configuraciones de generacion de los bloques P y F."""
+def escenarios_rejilla() -> list[SimConfig]:
+    """Las configuraciones de generacion de la rejilla unificada, sin semilla."""
     salida = []
     for n in N_NIVELES:
         for muestreo in MUESTREOS:
             for omega in OMEGAS:
                 for snr in SNR_NIVELES:
-                    salida.append(_cfg(n, muestreo, omega, snr))
+                    for n_genes, prop in GENES_PROP:
+                        salida.append(_cfg(n, muestreo, omega, snr,
+                                           n_genes=n_genes, prop_rhythmic=prop))
     return salida
 
 
 def build_grid(bloque: str, reps: int) -> list[Cell]:
     """Todas las celdas de un bloque, con sus replicas."""
-    por_defecto = RobustConfig()
+    por_defecto = METODO_REFERENCIA
     celdas: list[Cell] = []
+
+    if bloque == "rejilla":
+        # Las replicas van en el bucle EXTERIOR a proposito: si la ejecucion
+        # se interrumpe a medias, lo que hay en disco es la rejilla entera con
+        # menos replicas, que sigue siendo un diseno equilibrado y analizable.
+        # Con las replicas dentro quedarian unas celdas completas y otras sin
+        # empezar.
+        escenarios = escenarios_rejilla()
+        for rep in range(reps):
+            for cfg in escenarios:
+                sembrada = _con_semilla(bloque, cfg, rep)
+                for gcore in GCORE_NIVELES:
+                    for fmm in FMM_METODOS:
+                        for metodo in METODOS_RESUMEN:
+                            celdas.append(Cell(bloque, sembrada, gcore, fmm,
+                                               metodo, rep))
+        return celdas
 
     if bloque in ("sin_ruido", "sin_ruido_stab"):
         # Verificacion de que el pipeline reconstruye el orden cuando los
-        # datos son perfectos. Factorial completo de los tres factores del
-        # bloque principal, sin el eje de senal-ruido, que aqui no aplica.
-        # Cualquier error residual no puede venir del ruido, asi que aisla
-        # los sesgos del propio algoritmo.
+        # datos son perfectos. Factorial de los tres factores de forma, sin
+        # el eje de senal-ruido, que aqui no aplica. Cualquier error residual
+        # no puede venir del ruido, asi que aisla los sesgos del algoritmo.
         #
-        # La variante _stab corre las MISMAS matrices con el FMM estabilizado.
-        # Aisla el sesgo propio de la regularizacion: lo que se vea aqui no
-        # puede ser variabilidad por ruido, porque no hay ruido. Comparte la
-        # semilla de generacion por el mismo motivo que regularizacion con
-        # principal.
+        # La variante _stab corre las MISMAS matrices con el FMM estabilizado
+        # y aisla el sesgo propio de la regularizacion.
         fmm = "base" if bloque == "sin_ruido" else "stabilized"
         for n in N_NIVELES:
             for muestreo in MUESTREOS:
@@ -189,53 +241,10 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
                             GCORE_CENTRAL, fmm, por_defecto, rep))
         return celdas
 
-    if bloque == "piloto":
-        for snr in SNR_NIVELES:
-            for rep in range(reps):
-                cfg = _cfg(N_CENTRAL, MUESTREO_CENTRAL, OMEGA_CENTRAL, snr)
-                celdas.append(Cell(bloque, _con_semilla(bloque, cfg, rep),
-                                   GCORE_CENTRAL, "base", por_defecto, rep))
-        return celdas
-
-    if bloque in ("principal", "regularizacion"):
-        fmm = "base" if bloque == "principal" else "stabilized"
-        for cfg in _base_principal():
-            for rep in range(reps):
-                # semilla del bloque principal en los dos casos: la
-                # comparacion es pareada sobre la matriz identica
-                celdas.append(Cell(
-                    bloque, _con_semilla(SEMILLA_COMPARTIDA, cfg, rep),
-                    GCORE_CENTRAL, fmm, por_defecto, rep,
-                ))
-        return celdas
-
-    if bloque == "agregacion":
-        for prop in PROP_NIVELES:
-            for snr in SNR_NIVELES:
-                for n in N_NIVELES:
-                    cfg = _cfg(n, MUESTREO_CENTRAL, OMEGA_CENTRAL, snr,
-                               n_genes=GENES_AGREGACION, prop_rhythmic=prop)
-                    for rep in range(reps):
-                        sembrada = _con_semilla(bloque, cfg, rep)
-                        for metodo in METODOS_RESUMEN:
-                            celdas.append(Cell(bloque, sembrada, GCORE_CENTRAL,
-                                               "base", metodo, rep))
-        return celdas
-
-    if bloque == "gcore":
-        for gcore in GCORE_NIVELES:
-            for snr in SNR_NIVELES:
-                for n in N_NIVELES:
-                    cfg = _cfg(n, MUESTREO_CENTRAL, OMEGA_CENTRAL, snr)
-                    for rep in range(reps):
-                        celdas.append(Cell(bloque, _con_semilla(bloque, cfg, rep),
-                                           gcore, "base", por_defecto, rep))
-        return celdas
-
     if bloque == "invariancia":
-        # Tres pares con el mismo SNR y distinta escala absoluta. Si la
-        # decision 4 de la spec es correcta, los dos miembros de cada par
-        # tienen que dar metricas identicas.
+        # Tres pares con el mismo SNR y distinta escala absoluta. Si el
+        # pipeline solo ve A/sigma, los dos miembros de cada par tienen que
+        # dar metricas identicas.
         for snr in (1.0, 2.0, 4.0):
             for sigma in (SIGMA_BASE, SIGMA_BASE * 4.0):
                 cfg = _cfg(N_CENTRAL, MUESTREO_CENTRAL, OMEGA_CENTRAL, snr,

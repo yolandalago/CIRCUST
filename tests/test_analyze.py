@@ -4,21 +4,30 @@ import pandas as pd
 import pytest
 
 from simulation.analyze import (
-    MEDIDAS, tabla_agregacion, tabla_atlas, tabla_gcore, tabla_principal,
-    tabla_regularizacion, tabla_sin_ruido,
+    FACTORES, MEDIDAS, contraste_fmm, contraste_metodos, efectos_principales,
+    interaccion, modelo_lineal, tabla_atlas, tabla_por_factor,
+    tabla_reconstruccion, tabla_sin_ruido, tabla_tiempos_python,
+)
+
+METODOS = (
+    ("best_k", "r2_median", "auto", "circmean"),
+    ("best_k", "medoid", "auto", "circmean"),
+    ("aggregate", "r2_median", "tsp3", "circmean"),
+    ("aggregate", "r2_median", "hods", "circmean"),
 )
 
 
 def _fila(**kw):
     base = dict(
-        bloque="principal", fmm_method="base", sampling="uniforme", omega=0.5,
-        snr=2.0, n_samples=48, rep=0, n_core=20, prop_rhythmic=0.20,
+        bloque="rejilla", fmm_method="base", sampling="uniforme", omega=0.5,
+        snr=2.0, n_samples=48, rep=0, n_core=20, n_genes=1000,
+        prop_rhythmic=0.20,
         robust_method="best_k", selection_criterion="r2_median",
         aggregation="auto", consensus_scale="circmean", status="ok",
-        medae_h=1.0, mae_h=1.2, rho_circ=0.9, tau=0.8, tau_circ=0.9,
+        medae_h=1.0, mae_h=1.2, rho_circ=0.9, rho_fl=0.9, tau=0.8, tau_circ=0.9,
         orientacion_ok=1.0, p1=0.4, p2=0.7, p4=0.9, mae_h_oracle=0.5,
         r2_anchor=0.8, pares_ok=1.0, evidencia=1.7, desacuerdo_K=0.01,
-        n_top=100, t_total_s=5.0,
+        n_top=100, t_total_s=5.0, t_robust_s=2.0,
         atlas_rmse_curva=0.3, atlas_err_pico_sd_h=1.0,
         atlas_omega_sesgo=-0.2, atlas_vpp=0.95,
     )
@@ -26,98 +35,116 @@ def _fila(**kw):
     return base
 
 
-def _falso():
+def _falso(reps: int = 3) -> pd.DataFrame:
+    """
+    Rejilla falsa: 2 muestreos x 2 omegas x 2 SNR x 2 FMM x 4 metodos x reps.
+
+    Efectos plantados, para que los tests sepan que esperar:
+    - el estabilizado tiene 0,1 menos de RMSE de curva, y la ventaja es el
+      doble con snr 1 que con snr 3
+    - la agregacion (tsp3 y hods) tiene 0,1 h menos de oraculo que la
+      referencia, medoid 0,05 h menos
+    """
     filas = []
-    for bloque, fmm in (("principal", "base"), ("regularizacion", "stabilized")):
-        for mu in ("uniforme", "hueco"):
-            for w in (0.1, 0.9):
-                for snr in (1.0, 3.0):
-                    for rep in range(3):
-                        filas.append(_fila(
-                            bloque=bloque, fmm_method=fmm, sampling=mu,
-                            omega=w, snr=snr, rep=rep,
-                            # stabilized es 0,5 h mejor en el falso
-                            medae_h=1.5 if fmm == "base" else 1.0,
-                            # y recupera mejor la onda por gen
-                            atlas_rmse_curva=0.4 if fmm == "base" else 0.2,
-                            atlas_omega_sesgo=(-0.30 if fmm == "base"
-                                               else -0.05)))
-    for prop in (0.01, 0.20):
-        for metodo in ("best_k", "aggregate"):
-            for rep in range(3):
-                filas.append(_fila(bloque="agregacion", prop_rhythmic=prop,
-                                   robust_method=metodo, aggregation="tsp3",
-                                   rep=rep))
-    for gcore in (10, 20, 30):
-        for rep in range(3):
-            filas.append(_fila(bloque="gcore", n_core=gcore, rep=rep))
+    for mu in ("uniforme", "hueco"):
+        for w in (0.1, 0.9):
+            for snr in (1.0, 3.0):
+                for rep in range(reps):
+                    for fmm in ("base", "stabilized"):
+                        for rm, sel, agg, esc in METODOS:
+                            ventaja_fmm = (0.2 if snr == 1.0 else 0.1) if fmm == "stabilized" else 0.0
+                            ventaja_met = {"tsp3": 0.1, "hods": 0.1}.get(agg, 0.0)
+                            if sel == "medoid":
+                                ventaja_met = 0.05
+                            filas.append(_fila(
+                                fmm_method=fmm, sampling=mu, omega=w, snr=snr,
+                                rep=rep, robust_method=rm, selection_criterion=sel,
+                                aggregation=agg, consensus_scale=esc,
+                                atlas_rmse_curva=0.4 - ventaja_fmm,
+                                mae_h_oracle=0.6 - ventaja_met,
+                                medae_h=1.5 - ventaja_met,
+                            ))
     for w in (0.1, 0.9):
-        for rep in range(3):
+        for rep in range(reps):
             filas.append(_fila(bloque="sin_ruido", omega=w, snr=1e6,
                                tau_circ=0.2 if w == 0.1 else 1.0,
                                orientacion_ok=0.0 if w == 0.1 else 1.0))
     return pd.DataFrame(filas)
 
 
-def test_tabla_principal_resume_por_los_factores():
-    t = tabla_principal(_falso())
+# ── reconstruccion ─────────────────────────────────────────────────────────
+
+def test_tabla_reconstruccion_usa_solo_la_referencia():
+    t = tabla_reconstruccion(_falso())
     assert list(t.index.names) == ["sampling", "omega", "snr"]
-    # una fila por combinacion de los tres factores del falso
     assert len(t) == 2 * 2 * 2
+    # 3 replicas por celda: solo base y best_k:r2_median entran
+    assert (t[("n", "")] == 3).all()
     assert {"medae_h", "abs_tau_circ", "orientacion_ok"} <= set(
         t.columns.get_level_values(0))
 
 
+def test_tabla_por_factor_tiene_una_fila_por_nivel():
+    t = tabla_por_factor(_falso()).reset_index()
+    assert set(t["factor"]) == set(FACTORES)
+    assert set(t[t.factor == "sampling"]["nivel"]) == {"uniforme", "hueco"}
+
+
 def test_rho_se_agrega_con_mediana_y_no_con_media():
     """
-    Decision tomada tras medir su fragilidad: rho cambia de signo en torno al
-    1-2 % de las replicas aunque la reconstruccion sea perfecta, y una sola
-    replica mala arrastra la media de la celda. La mediana aguanta.
+    rho cambia de signo en torno al 1-2 % de las replicas aunque la
+    reconstruccion sea perfecta. Una sola replica mala arrastra la media de
+    la celda, la mediana aguanta.
     """
     df = _falso()
-    p = df[df.bloque == "principal"].copy()
-    # una replica de cada celda con rho catastrofico
-    idx = p.groupby(["sampling", "omega", "snr"]).head(1).index
-    p.loc[idx, "rho_circ"] = -0.9
-    t = tabla_principal(pd.concat([df[df.bloque != "principal"], p]))
-    # la mediana de (0.9, 0.9, -0.9) es 0.9; la media seria 0.3
+    ref = (df.bloque == "rejilla") & (df.fmm_method == "base") \
+        & (df.selection_criterion == "r2_median") & (df.robust_method == "best_k")
+    idx = df[ref].groupby(["sampling", "omega", "snr"]).head(1).index
+    df.loc[idx, "rho_circ"] = -0.9
+    t = tabla_reconstruccion(df)
     assert (t[("rho_circ", "mediana")] > 0.8).all()
 
 
 def test_la_orientacion_se_agrega_como_TASA_no_como_mediana():
-    """Es una proporcion de aciertos, no una medida continua."""
     df = _falso()
-    p = df[df.bloque == "principal"].copy()
-    idx = p.groupby(["sampling", "omega", "snr"]).head(1).index
-    p.loc[idx, "orientacion_ok"] = 0.0        # 1 de cada 3 replicas falla
-    t = tabla_principal(pd.concat([df[df.bloque != "principal"], p]))
+    ref = (df.bloque == "rejilla") & (df.fmm_method == "base") \
+        & (df.selection_criterion == "r2_median") & (df.robust_method == "best_k")
+    idx = df[ref].groupby(["sampling", "omega", "snr"]).head(1).index
+    df.loc[idx, "orientacion_ok"] = 0.0
+    t = tabla_reconstruccion(df)
     assert np.allclose(t[("orientacion_ok", "tasa")].values, 2 / 3)
 
 
-def test_tabla_regularizacion_es_pareada():
-    """La diferencia se calcula por replica, no entre medias de celda."""
-    t = tabla_regularizacion(_falso())
-    assert "delta_medae_h" in t.columns.get_level_values(0)
-    # en el falso, stabilized es 0,5 h mejor en todas las celdas
-    assert np.allclose(t[("delta_medae_h", "mediana")].values, -0.5)
+def test_las_filas_con_fallo_no_entran_en_las_medianas_pero_si_se_cuentan():
+    df = _falso()
+    ref = (df.bloque == "rejilla") & (df.fmm_method == "base") \
+        & (df.selection_criterion == "r2_median") & (df.robust_method == "best_k")
+    malas = df[ref].head(4).copy()
+    malas["rep"] += 100
+    malas["status"] = "fallo"
+    for m in MEDIDAS:
+        if m in malas.columns:
+            malas[m] = np.nan
+    t = tabla_reconstruccion(pd.concat([df, malas], ignore_index=True))
+    assert not t[("medae_h", "mediana")].isna().any()
+    assert (t[("tasa_fallo", "")] > 0).any()
 
 
-def test_tabla_agregacion_separa_por_prop_rhythmic():
-    t = tabla_agregacion(_falso()).reset_index()
-    assert set(t["prop_rhythmic"]) == {0.01, 0.20}
-    assert set(t["robust_method"]) == {"best_k", "aggregate"}
-
-
-def test_tabla_gcore_tiene_los_tres_niveles():
-    t = tabla_gcore(_falso()).reset_index()
-    assert set(t["n_core"]) == {10, 20, 30}
+def test_la_calidad_del_orden_se_resume_en_valor_absoluto():
+    """
+    tau_circ cambia de signo cuando el ciclo se recorre al reves. Cuatro
+    replicas +0,8 +0,8 -0,8 -0,8 resumidas con signo dan 0,0, que se lee
+    como "no se recupero nada" cuando la calidad real es 0,8 en las cuatro.
+    """
+    filas = [_fila(rep=i, tau_circ=s * 0.8, orientacion_ok=float(s > 0))
+             for i, s in enumerate([1, 1, -1, -1])]
+    t = tabla_reconstruccion(pd.DataFrame(filas))
+    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.8)
+    assert t[("orientacion_ok", "tasa")].iloc[0] == pytest.approx(0.5)
+    assert ("tau_circ", "mediana") not in t.columns
 
 
 def test_tabla_sin_ruido_separa_orden_de_orientacion():
-    """
-    Es la verificacion que se le ensena a la tutora: con datos perfectos y
-    omega moderada el orden tiene que salir exacto, y con omega 0,1 se rompe.
-    """
     t = tabla_sin_ruido(_falso()).reset_index()
     assert set(t["omega"]) == {0.1, 0.9}
     buena = t[t.omega == 0.9].iloc[0]
@@ -127,99 +154,103 @@ def test_tabla_sin_ruido_separa_orden_de_orientacion():
     assert mala[("orientacion_ok", "tasa")] == pytest.approx(0.0)
 
 
-def test_las_filas_con_fallo_no_entran_en_las_medianas_pero_si_se_cuentan():
+# ── contraste FMM ──────────────────────────────────────────────────────────
+
+def test_contraste_fmm_es_pareado_y_con_el_metodo_fijo():
+    par = contraste_fmm(_falso())
+    # 8 celdas x 3 replicas, un par por replica, solo la referencia
+    assert len(par) == 8 * 3
+    esperado = np.where(par["snr"] == 1.0, -0.2, -0.1)
+    assert np.allclose(par["delta_atlas_rmse_curva"], esperado)
+
+
+def test_contraste_fmm_descarta_las_replicas_con_orientacion_invertida():
     df = _falso()
-    malas = df[df.bloque == "principal"].head(4).copy()
-    malas["status"] = "fallo"
-    for m in MEDIDAS:
-        malas[m] = np.nan
-    t = tabla_principal(pd.concat([df, malas], ignore_index=True))
-    assert not t[("medae_h", "mediana")].isna().any()
-    assert "tasa_fallo" in t.columns.get_level_values(0)
-    assert (t[("tasa_fallo", "")] > 0).any()
+    malas = (df.bloque == "rejilla") & (df.fmm_method == "stabilized") & (df.rep == 0)
+    df.loc[malas, "orientacion_ok"] = 0.0
+    par = contraste_fmm(df)
+    assert 0 not in set(par["rep"])
+    assert len(par) == 8 * 2
 
 
-def test_no_se_escriben_figuras_vacias(tmp_path):
-    """
-    Antes se escribian PNG vacios cuando el bloque no se habia ejecutado, y un
-    fichero vacio parece una figura valida.
-    """
-    from simulation.analyze import figura_snr
-    solo_sin_ruido = _falso().query("bloque == 'sin_ruido'")
-    with pytest.raises(ValueError, match="no hay datos"):
-        figura_snr(solo_sin_ruido, tmp_path / "vacia.png")
-    assert not (tmp_path / "vacia.png").exists()
+def test_contraste_fmm_falla_si_las_replicas_no_casan():
+    df = _falso()
+    df.loc[df.fmm_method == "stabilized", "rep"] += 50
+    with pytest.raises(ValueError, match="no cuadra"):
+        contraste_fmm(df)
+
+
+def test_efectos_principales_detectan_la_interaccion_plantada():
+    par = contraste_fmm(_falso())
+    t = efectos_principales(par, "atlas_rmse_curva").reset_index()
+    snr = t[t.factor == "snr"].set_index("nivel")
+    assert snr.loc["1.0", "mediana"] == pytest.approx(-0.2)
+    assert snr.loc["3.0", "mediana"] == pytest.approx(-0.1)
+    assert (t["tasa_victorias"] == 1.0).all()
+    assert set(t["factor"]) == set(FACTORES)
+
+
+def test_interaccion_devuelve_el_mapa_de_dos_factores():
+    par = contraste_fmm(_falso())
+    m = interaccion(par, "atlas_rmse_curva", "omega", "snr")
+    assert m.shape == (2, 2)
+    assert m.loc[0.1, 1.0] == pytest.approx(-0.2)
+    v = interaccion(par, "atlas_rmse_curva", "omega", "snr", "victorias")
+    assert (v.values == 1.0).all()
+
+
+def test_modelo_lineal_recupera_el_efecto_plantado():
+    par = contraste_fmm(_falso())
+    t = modelo_lineal(par, "atlas_rmse_curva", factores=["snr", "omega", "sampling"])
+    # pasar de snr 1 a snr 3 reduce la ventaja en 0,1
+    assert t.loc["C(snr)[T.3.0]", "coef"] == pytest.approx(0.1)
+    assert abs(t.loc["C(omega)[T.0.9]", "coef"]) < 1e-9
+    assert t.attrs["r2"] == pytest.approx(1.0)
 
 
 def test_tabla_atlas_separa_los_dos_metodos_en_niveles():
-    """
-    La tabla pareada da la diferencia, que es la que tiene potencia. Esta da
-    los valores absolutos, sin los cuales no se puede decir si el atlas es
-    utilizable o solo menos malo.
-    """
     t = tabla_atlas(_falso())
     assert "fmm_method" in t.index.names
-    metodos = t.index.get_level_values("fmm_method").unique()
-    assert set(metodos) == {"base", "stabilized"}
     col = ("atlas_rmse_curva", "mediana")
     base = t.xs("base", level="fmm_method")[col]
     stab = t.xs("stabilized", level="fmm_method")[col]
     assert (stab.values < base.values).all()
 
 
-def test_tabla_atlas_descarta_las_celdas_con_la_orientacion_invertida():
-    """
-    Una escala reflejada da un atlas especular, con el error de pico repartido
-    por todo el ciclo. Promediarlo junto a los aciertos mezcla dos regimenes
-    distintos en vez de dos calidades.
-    """
-    df = _falso()
-    malas = df["bloque"].isin(("principal", "regularizacion")) & (df["rep"] == 0)
-    df.loc[malas, "orientacion_ok"] = 0.0
-    df.loc[malas, "atlas_rmse_curva"] = 99.0
+# ── contraste de metodos ───────────────────────────────────────────────────
 
-    t = tabla_atlas(df)
-    assert t[("atlas_rmse_curva", "mediana")].max() < 1.0
+def test_contraste_metodos_es_pareado_contra_la_referencia():
+    met = contraste_metodos(_falso())
+    assert set(met["metodo"]) == {"best_k:medoid", "aggregate:tsp3:circmean",
+                                  "aggregate:hods:circmean"}
+    tsp = met[met.metodo == "aggregate:tsp3:circmean"]
+    assert len(tsp) == 8 * 3
+    assert np.allclose(tsp["delta_mae_h_oracle"], -0.1)
+    med = met[met.metodo == "best_k:medoid"]
+    assert np.allclose(med["delta_mae_h_oracle"], -0.05)
 
 
-def test_la_tabla_pareada_lleva_las_medidas_del_atlas():
-    """Es el bloque donde base y estabilizado de verdad se diferencian."""
-    t = tabla_regularizacion(_falso())
-    assert ("delta_atlas_rmse_curva", "mediana") in t.columns
-    assert ("delta_atlas_omega_sesgo", "mediana") in t.columns
-    # el estabilizado recupera mejor la onda: la delta tiene que ser negativa
-    assert (t[("delta_atlas_rmse_curva", "mediana")] < 0).all()
+def test_contraste_metodos_solo_usa_el_fmm_pedido():
+    a = contraste_metodos(_falso(), fmm="base")
+    b = contraste_metodos(_falso(), fmm="stabilized")
+    assert len(a) == len(b)
 
 
-def test_la_calidad_del_orden_se_resume_en_valor_absoluto():
-    """
-    ``tau_circ`` cambia de signo cuando el ciclo se recorre al reves, asi que
-    su signo dice la orientacion y su magnitud la calidad del orden. Son dos
-    preguntas distintas en una columna, y ``orientacion_ok`` ya se define como
-    ``tau_circ > 0``.
-
-    Cuatro replicas que recuperan el orden igual de bien, dos con el sentido
-    correcto y dos al reves, dan +0,8 +0,8 -0,8 -0,8. Resumido con signo sale
-    0,0, que se lee como "no se recupero nada" cuando la calidad real es 0,8
-    en las cuatro.
-    """
-    filas = [_fila(bloque="principal", rep=i, snr=2.0,
-                   tau_circ=s * 0.8, orientacion_ok=float(s > 0))
-             for i, s in enumerate([1, 1, -1, -1])]
-    t = tabla_principal(pd.DataFrame(filas))
-
-    assert ("abs_tau_circ", "mediana") in t.columns
-    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.8)
-    # el signo no se pierde, se reporta aparte como tasa
-    assert t[("orientacion_ok", "tasa")].iloc[0] == pytest.approx(0.5)
-    # y la columna con signo ya no aparece, para que nadie la lea como calidad
-    assert ("tau_circ", "mediana") not in t.columns
+def test_efectos_principales_por_metodo():
+    met = contraste_metodos(_falso())
+    t = efectos_principales(met, "mae_h_oracle", por=["metodo"]).reset_index()
+    assert set(t["metodo"]) == set(met["metodo"])
+    hods = t[(t.metodo == "aggregate:hods:circmean") & (t.factor == "snr")]
+    assert np.allclose(hods["mediana"], -0.1)
 
 
-def test_con_la_orientacion_siempre_acertada_las_dos_formas_coinciden():
-    """El arreglo no toca ninguna celda sana."""
-    filas = [_fila(bloque="principal", rep=i, snr=3.0,
-                   tau_circ=v, orientacion_ok=1.0)
-             for i, v in enumerate([0.90, 0.93, 0.95, 0.97])]
-    t = tabla_principal(pd.DataFrame(filas))
-    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.94)
+def test_tabla_tiempos_python_separa_fmm_y_metodo():
+    t = tabla_tiempos_python(_falso())
+    assert list(t.index.names) == ["fmm_method", "metodo", "n_genes", "n_samples"]
+    assert "t_total_s" in t.columns
+
+
+def test_sin_rejilla_falla_con_mensaje():
+    solo = _falso().query("bloque == 'sin_ruido'")
+    with pytest.raises(ValueError, match="rejilla"):
+        contraste_fmm(solo)

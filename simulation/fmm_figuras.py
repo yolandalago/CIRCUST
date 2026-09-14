@@ -75,7 +75,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from simulation.truth import TWO_PI
 
-CLAVE_PAREADA = ["n_samples", "sampling", "omega", "snr", "rep"]
+from simulation.analyze import (
+    CLAVE_REPLICA as CLAVE_PAREADA, METODO_REFERENCIA, _derivadas,
+)
 
 # Celdas del volcado por gen. Son pocas y elegidas a proposito:
 #   - (24, 1.0) es la esquina donde el estabilizado gana por goleada
@@ -94,22 +96,27 @@ CELDAS_POR_GEN = (
 # Datos
 # ═══════════════════════════════════════════════════════════════════════════
 
-def cargar_pareado(entrada: Path | str) -> pd.DataFrame:
+def cargar_pareado(entrada: Path | str,
+                   metodo: str = METODO_REFERENCIA) -> pd.DataFrame:
     """
     Une el brazo base con el estabilizado replica a replica.
 
     La union es por identidad de generacion mas numero de replica, que es lo
     que garantiza que las dos filas corrieron sobre la MISMA matriz. Sin eso
     la comparacion seria entre celdas con ruido distinto y perderia casi toda
-    la potencia del diseno.
+    la potencia del diseno. El metodo de resumen se fija para que lo unico
+    que cambie entre los dos brazos sea el ajuste por gen.
     """
-    d = pd.read_csv(Path(entrada) / "resultados.csv")
-    b = d[(d["bloque"] == "principal") & (d["status"] == "ok")]
-    s = d[(d["bloque"] == "regularizacion") & (d["status"] == "ok")]
+    d = _derivadas(pd.read_csv(Path(entrada) / "resultados.csv"))
+    d = d[(d["bloque"] == "rejilla") & (d["status"] == "ok")
+          & (d["metodo"] == metodo)]
+    b = d[d["fmm_method"] == "base"]
+    s = d[d["fmm_method"] == "stabilized"]
     if b.empty or s.empty:
-        raise ValueError("faltan filas de principal o de regularizacion")
+        raise ValueError("faltan filas de base o de estabilizado en la rejilla")
 
-    par = b.merge(s, on=CLAVE_PAREADA, suffixes=("_b", "_s"))
+    clave = [c for c in CLAVE_PAREADA if c in d.columns]
+    par = b.merge(s, on=clave, suffixes=("_b", "_s"))
     if par.empty:
         raise ValueError("el emparejamiento no cuadra, revisa las semillas")
 
@@ -175,9 +182,11 @@ def tabla_wilcoxon(par: pd.DataFrame,
     un efecto mediano pequeno con el 100 % de victorias es una mejora mas
     solida que uno grande con el 55 %.
 
-    Las 135 celdas se contrastan a la vez, asi que los p-valores llevan
-    Benjamini-Hochberg. Sin eso, al 5 % se esperarian unas 7 celdas
-    significativas por puro azar.
+    Las celdas se contrastan a la vez, asi que los p-valores llevan
+    Benjamini-Hochberg. Sin eso, al 5 % se esperarian varias celdas
+    significativas por puro azar. Se agrupa por omega, n y A/sigma, que son
+    los factores donde el efecto cambia de signo. Los demas factores de la
+    rejilla quedan promediados dentro de cada celda, con los pares intactos.
     """
     from scipy.stats import wilcoxon
 

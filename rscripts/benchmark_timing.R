@@ -41,7 +41,17 @@ REPO_ROOT  <- normalizePath(".")
 RSCRIPTS   <- file.path(REPO_ROOT, "rscripts")
 RDATA_PATH <- file.path(REPO_ROOT, "data", "matrixIn.RData")
 OUT_DIR    <- file.path(REPO_ROOT, "validation", "reference")
-dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# Matriz alternativa en CSV, con los genes como primera columna. Si se pasa,
+# sustituye a matrixIn.RData. La usa el bloque computacional del estudio de
+# simulacion (simulation/rbench.py), que exporta matriz_r.csv con los genes
+# core ya renombrados a los nombres que este script espera en coreG.
+MATRIX_CSV <- get_opt("--matrix", NA)
+OUT_CSV    <- get_opt("--out", file.path(OUT_DIR, "timing_R.csv"))
+LABEL      <- get_opt("--label", "matrixIn")
+if (!is.na(MATRIX_CSV)) MATRIX_CSV <- normalizePath(MATRIX_CSV)
+if (!grepl("^/", OUT_CSV)) OUT_CSV <- file.path(REPO_ROOT, OUT_CSV)
+dir.create(dirname(OUT_CSV), showWarnings = FALSE, recursive = TRUE)
 
 coreG <- c("PER1", "PER2", "PER3", "CRY1", "CRY2", "ARNTL", "CLOCK",
            "NR1D1", "RORA", "DBP", "TEF", "STAT3")
@@ -96,15 +106,26 @@ cat("  Fuentes cargadas.\n")
 # --------------------------------------------------------------------------
 # 3) Cargar matrixIn (opcionalmente submuestreado para smoke)
 # --------------------------------------------------------------------------
-cat(sprintf("Cargando %s ...\n", RDATA_PATH))
-load(RDATA_PATH)                       # define matrixIn
-if (!is.na(MAX_GENES) && MAX_GENES < nrow(matrixIn)) {
-  set.seed(1)
-  core_idx  <- which(rownames(matrixIn) %in% coreG)
-  other_idx <- setdiff(seq_len(nrow(matrixIn)), core_idx)
-  keep_idx  <- sort(c(core_idx, sample(other_idx, MAX_GENES - length(core_idx))))
-  matrixIn  <- matrixIn[keep_idx, ]
-  cat(sprintf("  Submuestreo smoke: %d genes (incluye core).\n", nrow(matrixIn)))
+if (!is.na(MATRIX_CSV)) {
+  cat(sprintf("Cargando %s ...\n", MATRIX_CSV))
+  df       <- read.csv(MATRIX_CSV, row.names = 1, check.names = FALSE)
+  matrixIn <- as.matrix(df)
+  faltan   <- setdiff(coreG, rownames(matrixIn))
+  if (length(faltan) > 0) {
+    stop(sprintf("Faltan genes core en la matriz: %s",
+                 paste(faltan, collapse = ", ")))
+  }
+} else {
+  cat(sprintf("Cargando %s ...\n", RDATA_PATH))
+  load(RDATA_PATH)                     # define matrixIn
+  if (!is.na(MAX_GENES) && MAX_GENES < nrow(matrixIn)) {
+    set.seed(1)
+    core_idx  <- which(rownames(matrixIn) %in% coreG)
+    other_idx <- setdiff(seq_len(nrow(matrixIn)), core_idx)
+    keep_idx  <- sort(c(core_idx, sample(other_idx, MAX_GENES - length(core_idx))))
+    matrixIn  <- matrixIn[keep_idx, ]
+    cat(sprintf("  Submuestreo smoke: %d genes (incluye core).\n", nrow(matrixIn)))
+  }
 }
 cat(sprintf("  matrixIn: %d genes x %d muestras\n", nrow(matrixIn), ncol(matrixIn)))
 
@@ -177,6 +198,8 @@ setwd(REPO_ROOT)
 unlink(scratch, recursive = TRUE)   # limpia los PNG/TXT del scratch
 
 timing_R <- do.call(rbind, rows)
-out_csv  <- file.path(OUT_DIR, "timing_R.csv")
+timing_R$implementacion <- "r"
+timing_R$celda <- LABEL
+out_csv <- OUT_CSV
 write.csv(timing_R, out_csv, row.names = FALSE)
 cat(sprintf("\nGuardado: %s  (%d filas)\n", out_csv, nrow(timing_R)))

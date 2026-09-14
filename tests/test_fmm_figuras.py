@@ -15,9 +15,13 @@ from simulation.fmm_figuras import (
 
 
 def _fila(bloque, fmm, rep, snr=2.0, omega=0.5, n=48, rmse=0.3, **kw):
+    """``bloque`` se conserva por compatibilidad: siempre es la rejilla."""
     base = dict(
-        bloque=bloque, fmm_method=fmm, rep=rep, snr=snr, omega=omega,
-        n_samples=n, sampling="uniforme", status="ok", orientacion_ok=1.0,
+        bloque="rejilla", fmm_method=fmm, rep=rep, snr=snr, omega=omega,
+        n_samples=n, sampling="uniforme", n_genes=1000, prop_rhythmic=0.2,
+        n_core=20, robust_method="best_k", selection_criterion="r2_median",
+        aggregation="auto", consensus_scale="circmean",
+        status="ok", orientacion_ok=1.0,
         atlas_rmse_curva=rmse, atlas_err_pico_sd_h=1.0,
         atlas_omega_sesgo=-0.1, atlas_vpp=0.95, atlas_err_subida_h=1.0,
     )
@@ -34,8 +38,8 @@ def _csv(tmp_path, filas):
 def test_el_emparejamiento_une_la_misma_replica_de_los_dos_brazos(tmp_path):
     filas = []
     for rep in range(4):
-        filas.append(_fila("principal", "base", rep, rmse=0.40))
-        filas.append(_fila("regularizacion", "stabilized", rep, rmse=0.25))
+        filas.append(_fila("rejilla", "base", rep, rmse=0.40))
+        filas.append(_fila("rejilla", "stabilized", rep, rmse=0.25))
     par = cargar_pareado(_csv(tmp_path, filas))
 
     assert len(par) == 4
@@ -49,8 +53,8 @@ def test_no_se_emparejan_replicas_distintas(tmp_path):
     MISMA matriz. Si las replicas no casan, no hay nada que emparejar y hay
     que fallar en vez de comparar cosas distintas.
     """
-    filas = [_fila("principal", "base", 0),
-             _fila("regularizacion", "stabilized", 99)]
+    filas = [_fila("rejilla", "base", 0),
+             _fila("rejilla", "stabilized", 99)]
     with pytest.raises(ValueError, match="no cuadra"):
         cargar_pareado(_csv(tmp_path, filas))
 
@@ -63,8 +67,8 @@ def test_se_descartan_las_replicas_con_la_orientacion_invertida(tmp_path):
     filas = []
     for rep in range(4):
         # en la replica 0 falla el brazo estabilizado
-        filas.append(_fila("principal", "base", rep))
-        filas.append(_fila("regularizacion", "stabilized", rep,
+        filas.append(_fila("rejilla", "base", rep))
+        filas.append(_fila("rejilla", "stabilized", rep,
                            orientacion_ok=0.0 if rep == 0 else 1.0))
     par = cargar_pareado(_csv(tmp_path, filas))
     assert len(par) == 3
@@ -82,8 +86,8 @@ def test_la_tasa_de_victorias_cuenta_replicas_no_magnitud():
     # estabilizado y la tasa de victorias tambien, pero la MEDIA no
     deltas = [-0.01] * 9 + [+5.0]
     for rep, d in enumerate(deltas):
-        filas.append(_fila("principal", "base", rep, rmse=0.5))
-        filas.append(_fila("regularizacion", "stabilized", rep, rmse=0.5 + d))
+        filas.append(_fila("rejilla", "base", rep, rmse=0.5))
+        filas.append(_fila("rejilla", "stabilized", rep, rmse=0.5 + d))
     par = pd.DataFrame(filas)
     par = cargar_pareado_desde(par)
 
@@ -106,8 +110,8 @@ def test_wilcoxon_no_inventa_p_valores_con_pocos_pares():
     """Con menos de seis pares el contraste no tiene potencia ninguna."""
     filas = []
     for rep in range(3):
-        filas.append(_fila("principal", "base", rep, rmse=0.5))
-        filas.append(_fila("regularizacion", "stabilized", rep, rmse=0.3))
+        filas.append(_fila("rejilla", "base", rep, rmse=0.5))
+        filas.append(_fila("rejilla", "stabilized", rep, rmse=0.3))
     t = tabla_wilcoxon(cargar_pareado_desde(pd.DataFrame(filas)))
     assert np.isnan(t["p"].iloc[0])
     assert np.isnan(t["p_bh"].iloc[0])
@@ -137,10 +141,10 @@ def test_las_celdas_se_contrastan_por_separado():
     filas = []
     for rep in range(10):
         # celda A: gana el estabilizado. celda B: gana el base
-        filas.append(_fila("principal", "base", rep, snr=1.0, rmse=0.5))
-        filas.append(_fila("regularizacion", "stabilized", rep, snr=1.0, rmse=0.3))
-        filas.append(_fila("principal", "base", rep, snr=4.0, rmse=0.2))
-        filas.append(_fila("regularizacion", "stabilized", rep, snr=4.0, rmse=0.3))
+        filas.append(_fila("rejilla", "base", rep, snr=1.0, rmse=0.5))
+        filas.append(_fila("rejilla", "stabilized", rep, snr=1.0, rmse=0.3))
+        filas.append(_fila("rejilla", "base", rep, snr=4.0, rmse=0.2))
+        filas.append(_fila("rejilla", "stabilized", rep, snr=4.0, rmse=0.3))
     t = tabla_wilcoxon(cargar_pareado_desde(pd.DataFrame(filas)))
 
     assert len(t) == 2

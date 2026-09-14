@@ -2,67 +2,116 @@
 import pytest
 
 from simulation.grid import (
-    BLOQUES, METODOS_RESUMEN, SIGMA_SIN_RUIDO, SNR_NIVELES, build_grid,
-    cell_seed,
+    BLOQUES, FMM_METODOS, GCORE_NIVELES, GENES_PROP, METODO_REFERENCIA,
+    METODOS_RESUMEN, MUESTREOS, N_NIVELES, OMEGAS, SIGMA_SIN_RUIDO,
+    SNR_NIVELES, build_grid, cell_seed, escenarios_rejilla,
 )
 
 
 def test_todos_los_bloques_construyen():
     for bloque in BLOQUES:
-        celdas = build_grid(bloque, reps=2)
+        celdas = build_grid(bloque, reps=1)
         assert len(celdas) > 0, bloque
 
 
-def test_recuentos_de_la_spec():
+def test_recuentos_de_la_rejilla():
+    n_escenarios = (len(N_NIVELES) * len(MUESTREOS) * len(OMEGAS)
+                    * len(SNR_NIVELES) * len(GENES_PROP))
+    assert n_escenarios == 3 * 3 * 3 * 4 * 5 == 540
+    assert len(escenarios_rejilla()) == n_escenarios
+    por_escenario = len(GCORE_NIVELES) * len(FMM_METODOS) * len(METODOS_RESUMEN)
+    assert por_escenario == 3 * 2 * 5
+    assert len(build_grid("rejilla", reps=2)) == n_escenarios * por_escenario * 2
+
+
+def test_recuentos_de_los_bloques_de_verificacion():
     esperado = {
-        "principal":      135 * 2,
-        "regularizacion": 135 * 2,
-        "agregacion":     45 * 2 * len(METODOS_RESUMEN),
-        "gcore":          45 * 2,
+        "sin_ruido":      27 * 2,
+        "sin_ruido_stab": 27 * 2,
         "invariancia":    6 * 2,
         "computacional":  9 * 2,
     }
-    assert len(build_grid("piloto", reps=3)) == len(SNR_NIVELES) * 3
     for bloque, n in esperado.items():
         assert len(build_grid(bloque, reps=2)) == n, bloque
 
 
-def test_hay_cinco_metodos_de_resumen():
+def test_hay_cinco_metodos_de_resumen_y_una_referencia():
     etiquetas = [m.label for m in METODOS_RESUMEN]
     assert len(etiquetas) == 5
     assert len(set(etiquetas)) == 5
     assert "best_k:r2_median" in etiquetas
     assert "aggregate:tsp3:circmean" in etiquetas
     assert "aggregate:hods:circmean" in etiquetas
+    # la referencia es el comportamiento actual de CIRCUST antes de agregar
+    assert METODO_REFERENCIA.label == "best_k:r2_median"
 
 
-def test_principal_y_regularizacion_estan_emparejados():
+def test_la_rejilla_es_pareada_en_todas_las_variantes():
     """
-    Lo que hace pareada la comparacion: mismas matrices y mismas semillas,
-    cambiando solo fmm_method.
+    Lo que hace pareada la comparacion: para un escenario y una replica,
+    las 30 variantes (3 core x 2 FMM x 5 metodos) llevan la MISMA semilla y
+    por tanto corren sobre la misma matriz.
     """
-    p = build_grid("principal", reps=3)
-    f = build_grid("regularizacion", reps=3)
-    assert len(p) == len(f)
-    for cp, cf in zip(p, f):
-        assert cp.cfg == cf.cfg              # misma matriz exacta
-        assert cp.cfg.seed == cf.cfg.seed
-        assert cp.n_core_declared == cf.n_core_declared
-        assert cp.fmm_method == "base"
-        assert cf.fmm_method == "stabilized"
+    celdas = build_grid("rejilla", reps=2)
+    grupos: dict[tuple, list] = {}
+    for c in celdas:
+        grupos.setdefault((c.cfg, c.rep), []).append(c)
+    for (cfg, rep), variantes in grupos.items():
+        assert len(variantes) == 30
+        assert len({c.cfg.seed for c in variantes}) == 1
+        assert {c.fmm_method for c in variantes} == set(FMM_METODOS)
+        assert {c.n_core_declared for c in variantes} == set(GCORE_NIVELES)
+        assert len({c.robust_cfg.label for c in variantes}) == 5
+
+
+def test_replicas_distintas_llevan_semillas_distintas():
+    celdas = build_grid("rejilla", reps=3)
+    cfg0 = escenarios_rejilla()[0]
+    semillas = {c.cfg.seed for c in celdas
+                if c.cfg.n_samples == cfg0.n_samples
+                and c.cfg.sampling == cfg0.sampling
+                and c.cfg.omega == cfg0.omega
+                and c.cfg.amplitude == cfg0.amplitude
+                and c.cfg.n_genes == cfg0.n_genes
+                and c.cfg.prop_rhythmic == cfg0.prop_rhythmic}
+    assert len(semillas) == 3
+
+
+def test_las_replicas_van_en_el_bucle_exterior():
+    """
+    Si la ejecucion se interrumpe a medias, lo que hay en disco tiene que ser
+    la rejilla entera con menos replicas, no unas celdas completas y otras sin
+    empezar. Eso exige que la replica sea el bucle mas externo.
+    """
+    celdas = build_grid("rejilla", reps=2)
+    reps = [c.rep for c in celdas]
+    mitad = len(reps) // 2
+    assert set(reps[:mitad]) == {0}
+    assert set(reps[mitad:]) == {1}
 
 
 def test_las_semillas_son_deterministas_y_distintas_por_replica():
-    a = cell_seed("principal", "x", 0)
-    assert a == cell_seed("principal", "x", 0)
-    assert a != cell_seed("principal", "x", 1)
-    assert a != cell_seed("gcore", "x", 0)
+    a = cell_seed("rejilla", "x", 0)
+    assert a == cell_seed("rejilla", "x", 0)
+    assert a != cell_seed("rejilla", "x", 1)
+    assert a != cell_seed("sin_ruido", "x", 0)
 
 
-def test_agregacion_barre_prop_rhythmic():
-    celdas = build_grid("agregacion", reps=1)
-    props = {c.cfg.prop_rhythmic for c in celdas}
-    assert props == {0.01, 0.05, 0.20}
+def test_no_hay_row_id_repetidos():
+    celdas = build_grid("rejilla", reps=2)
+    ids = [c.row_id for c in celdas]
+    assert len(ids) == len(set(ids))
+
+
+def test_genes_y_prop_cubren_los_regimenes_de_senal():
+    """
+    Cinco combinaciones que cubren desde un TOP que no llega a llenarse (50
+    ritmicos) hasta uno saturado (1000), y dos pares con los mismos 50
+    ritmicos y distinto fondo, que aislan el efecto del numero de genes.
+    """
+    ritmicos = sorted(int(round(g * p)) for g, p in GENES_PROP)
+    assert ritmicos == [50, 50, 200, 250, 1000]
+    assert (1000, 0.01) not in GENES_PROP     # 10 ritmicos no alojan 30 core
 
 
 def test_invariancia_empareja_snr_con_escalas_distintas():
@@ -102,12 +151,12 @@ def test_todas_las_celdas_son_generables():
 
 def test_el_eje_de_senal_ruido_arranca_donde_hay_senal():
     """
-    Medido en la Task 6: por debajo de A/sigma = 1 el orden no se reconstruye
-    (oraculo 3,3 a 3,9 h) y gastar celdas ahi solo produce tasa de fallo. El
-    1,0 se conserva como celda de frontera.
+    Por debajo de A/sigma = 1 el orden no se reconstruye (oraculo 3,3 a 3,9 h)
+    y gastar celdas ahi solo produce tasa de fallo. El 1,0 se conserva como
+    celda de frontera. El 3 se quito tras medir que 3 y 4 son indistinguibles.
     """
     assert min(SNR_NIVELES) >= 1.0
-    assert len(SNR_NIVELES) == 5
+    assert SNR_NIVELES == (1.0, 1.5, 2.0, 4.0)
     # la transicion medida esta entre 1 y 2, y hay que muestrearla
     assert sum(1 for s in SNR_NIVELES if 1.0 <= s <= 2.0) >= 3
 
@@ -118,7 +167,6 @@ def test_bloque_sin_ruido_es_el_factorial_de_los_tres_factores():
     factorial n x muestreo x omega, sin eje de senal-ruido porque aqui no
     aplica. Cualquier error residual no puede venir del ruido.
     """
-    from simulation.grid import SIGMA_SIN_RUIDO
     celdas = build_grid("sin_ruido", reps=1)
     assert len(celdas) == 3 * 3 * 3
     assert {c.cfg.sigma for c in celdas} == {SIGMA_SIN_RUIDO}
@@ -134,14 +182,15 @@ def test_bloque_sin_ruido_es_el_factorial_de_los_tres_factores():
 def test_bloque_desconocido_falla():
     with pytest.raises(ValueError, match="Bloque desconocido"):
         build_grid("inventado", reps=1)
+    with pytest.raises(ValueError, match="Bloque desconocido"):
+        build_grid("principal", reps=1)      # bloque retirado
 
 
 def test_sin_ruido_stab_esta_pareado_con_sin_ruido():
     """
-    Mismo patron que principal contra regularizacion: los dos bloques generan
-    las matrices IDENTICAS y solo cambia ``fmm_method``. Sin esto la
-    comparacion seria entre celdas con ruido distinto y perderia toda la
-    potencia del diseno pareado.
+    Los dos bloques generan las matrices IDENTICAS y solo cambia
+    ``fmm_method``. Sin esto la comparacion seria entre celdas con ruido
+    distinto y perderia toda la potencia del diseno pareado.
     """
     a = build_grid("sin_ruido", reps=3)
     b = build_grid("sin_ruido_stab", reps=3)
@@ -156,8 +205,3 @@ def test_sin_ruido_stab_esta_pareado_con_sin_ruido():
     assert gen(a) == gen(b), (
         "las semillas de generacion no coinciden, la comparacion no seria pareada"
     )
-
-
-def test_sin_ruido_stab_no_lleva_ruido():
-    for c in build_grid("sin_ruido_stab", reps=1):
-        assert c.cfg.sigma == SIGMA_SIN_RUIDO

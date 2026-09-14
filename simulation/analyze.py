@@ -2,22 +2,33 @@
 Tablas y figuras del capitulo de simulaciones.
 
 Lee el CSV largo que produce ``run.py`` y produce las tablas que van a la
-memoria.
+memoria. El grueso trabaja sobre el bloque ``rejilla``, donde cada escenario
+y replica tiene las 30 variantes (3 core x 2 FMM x 5 metodos) corridas sobre
+la misma matriz.
+
+Las tres preguntas y como se responden
+--------------------------------------
+1. **Reconstruccion.** Como se comporta CIRCUST tal cual (FMM base, best_k
+   con r2_median) a lo largo de los factores. ``tabla_reconstruccion``.
+2. **Regularizacion del FMM.** Diferencia PAREADA estabilizado menos base,
+   replica a replica y con el metodo de resumen fijo. ``contraste_fmm``.
+3. **Agregacion.** Diferencia PAREADA de cada metodo de resumen contra la
+   referencia, con el FMM fijo. ``contraste_metodos``.
+
+Sobre cualquiera de los dos contrastes se aplican las mismas tres lecturas:
+``efectos_principales`` (mediana del delta, dispersion y tasa de victorias
+por nivel de cada factor), ``interaccion`` (mapa de dos factores) y
+``modelo_lineal`` (que factores modulan el delta, con numeros). Es lo que
+responde a "recorrer las mejoras a lo largo de los hiperparametros".
 
 Tres decisiones de agregacion, todas tomadas midiendo y no por costumbre
 -----------------------------------------------------------------------
 1. **Las medidas continuas se agregan con MEDIANA, no con media.** ``rho_circ``
    cambia de signo en torno al 1-2 % de las replicas aunque la reconstruccion
    sea perfecta, porque su direccion media queda mal determinada cuando las
-   muestras cubren todo el ciclo. Medido en el bloque sin ruido: 1 de 54
-   reconstrucciones con orden exacto dio ``rho = -0,093``. Una sola replica
-   asi arrastra la media de una celda de 20.
-
-   Por eso la correlacion que lidera las tablas es ``rho_fl``, la de Fisher y
-   Lee, que se construye sobre diferencias por pares y no necesita ninguna
-   direccion media. ``rho_circ`` se mantiene al lado porque es la que la
-   memoria presenta como "una posible medida", y su fragilidad medida es
-   justamente la justificacion de haber adoptado la otra.
+   muestras cubren todo el ciclo. Una sola replica asi arrastra la media de
+   una celda. Por eso la correlacion que lidera es ``rho_fl``, la de Fisher y
+   Lee, que no necesita direccion media.
 
 2. **La orientacion se agrega como TASA de acierto**, no como mediana, porque
    es una proporcion. Y va en columna propia porque ``medae_h`` mezcla dos
@@ -46,25 +57,26 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Factores de generacion y de configuracion que identifican una celda.
+FACTORES = ["n_samples", "sampling", "omega", "snr", "n_genes",
+            "prop_rhythmic", "n_core"]
+
+# Identidad de una replica: los factores mas el numero de replica. Dos filas
+# con la misma clave corrieron sobre la MISMA matriz.
+CLAVE_REPLICA = FACTORES + ["rep"]
+
+FMM_REFERENCIA    = "base"
+METODO_REFERENCIA = "best_k:r2_median"
+
 # Medidas continuas, se agregan con mediana.
 #
 # Va ``abs_tau_circ`` y no ``tau_circ``. ``tau_circ`` cambia de signo cuando el
 # ciclo se recorre al reves, de modo que su SIGNO y su MAGNITUD responden a dos
 # preguntas distintas: el signo dice la orientacion y la magnitud la calidad
-# del orden. De hecho ``orientacion_ok`` se define como ``tau_circ > 0``, asi
-# que el signo ya esta contado en su propia columna.
-#
-# Resumir el numero con signo mezcla las dos. Cuatro replicas que recuperan el
-# orden igual de bien, dos con el sentido correcto y dos al reves, dan
-# +0,8 +0,8 -0,8 -0,8 y mediana 0,0, que se lee como "no se recupero nada"
-# cuando la calidad real es 0,8 en las cuatro. Medido en la celda omega=0,1
-# con A/sigma=4: 106 replicas con mediana +0,294 y 74 reflejadas con mediana
-# -0,227 daban una mediana conjunta de +0,093, mientras que el oraculo decia
-# 1,85 h (un orden aleatorio da 5,4 h, medido sobre permutaciones).
-#
-# En valor absoluto las dos preguntas quedan separadas, una por columna, y no
-# se pierde nada. Donde la orientacion se acierta siempre las dos formas
-# coinciden hasta el ultimo decimal.
+# del orden. ``orientacion_ok`` se define como ``tau_circ > 0``, asi que el
+# signo ya esta contado en su propia columna. Resumir con signo mezcla las
+# dos: cuatro replicas +0,8 +0,8 -0,8 -0,8 dan mediana 0,0, que se lee como
+# "no se recupero nada" cuando la calidad real es 0,8 en las cuatro.
 MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "abs_tau_circ",
            "rho_fl", "rho_circ", "tau",
            "p2", "r2_anchor", "evidencia", "desacuerdo_K", "n_top"]
@@ -72,22 +84,28 @@ MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "abs_tau_circ",
 # Proporciones, se agregan con media porque son tasas.
 TASAS = ["orientacion_ok"]
 
-# Las cuatro del atlas que van a las tablas del capitulo. El CSV guarda
-# bastantes mas, pero cada una de estas responde a una pregunta distinta:
+# Las cuatro del atlas que van a las tablas del capitulo. Cada una responde a
+# una pregunta distinta:
 #
 #   resumen       atlas_rmse_curva      libre de parametrizacion
 #   interpretable atlas_err_pico_sd_h   en horas
 #   mecanismo     atlas_omega_sesgo     por que el estabilizado mejora
 #   practica      atlas_vpp             cuantos genes del atlas son ritmicos
-#
-# Del error de pico se lleva la DISPERSION y no la media: el pico no tiene
-# sesgo sistematico una vez descontado el giro global (medias de +0,00 y
-# -0,00 h a A/sigma=4), asi que todo el error esta en la dispersion entre
-# genes. De omega pasa lo contrario, ahi lo que hay es sesgo (-0,314 con el
-# base contra -0,039 con el estabilizado a n=24 y A/sigma=1).
 MEDIDAS_ATLAS = ["atlas_rmse_curva", "atlas_err_pico_sd_h",
                  "atlas_omega_sesgo", "atlas_vpp"]
 
+# Medidas de orden sobre las que se contrastan los metodos de resumen. El
+# oraculo y |tau_circ| miden el orden al margen del anclaje, medae_h es el
+# resultado conjunto que ve el usuario.
+MEDIDAS_ORDEN = ["mae_h_oracle", "abs_tau_circ", "medae_h"]
+
+TIEMPOS = ["t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s",
+           "t_robust_s", "t_total_s"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Carga y columnas derivadas
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _con_nivel(tabla: pd.DataFrame, columnas: list[str],
                nivel: str) -> pd.DataFrame:
@@ -97,22 +115,58 @@ def _con_nivel(tabla: pd.DataFrame, columnas: list[str],
     return salida
 
 
+def _etiqueta_metodo(df: pd.DataFrame) -> pd.Series:
+    """La misma etiqueta que ``RobustConfig.label``, reconstruida del CSV."""
+    agg = df["aggregation"].astype(str)
+    esc = df["consensus_scale"].astype(str)
+    sel = df["selection_criterion"].astype(str)
+    return pd.Series(
+        np.where(df["robust_method"] == "best_k", "best_k:" + sel,
+                 np.where(df["robust_method"] == "aggregate",
+                          "aggregate:" + agg + ":" + esc,
+                          df["robust_method"].astype(str))),
+        index=df.index,
+    )
+
+
 def _derivadas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Columnas que se calculan de otras y por eso no ocupan sitio en el CSV.
 
     ``abs_tau_circ`` es la calidad del orden al margen del sentido de giro.
-    Ver el comentario de ``MEDIDAS``.
+    ``metodo`` es la etiqueta del metodo de resumen.
     """
+    df = df.copy()
     if "tau_circ" in df.columns and "abs_tau_circ" not in df.columns:
-        return df.assign(abs_tau_circ=df["tau_circ"].abs())
+        df["abs_tau_circ"] = df["tau_circ"].abs()
+    if "robust_method" in df.columns and "metodo" not in df.columns:
+        df["metodo"] = _etiqueta_metodo(df)
     return df
 
 
 def load(path: Path | str) -> pd.DataFrame:
     """Carga el CSV largo de resultados."""
-    return _derivadas(pd.read_csv(path))
+    return _derivadas(pd.read_csv(path, low_memory=False))
 
+
+def _rejilla(df: pd.DataFrame) -> pd.DataFrame:
+    r = _derivadas(df)
+    r = r[r["bloque"] == "rejilla"]
+    if r.empty:
+        raise ValueError("no hay filas del bloque rejilla")
+    return r
+
+
+def _referencia(df: pd.DataFrame) -> pd.DataFrame:
+    """CIRCUST tal cual: FMM base y best_k con r2_median."""
+    r = _rejilla(df)
+    return r[(r["fmm_method"] == FMM_REFERENCIA)
+             & (r["metodo"] == METODO_REFERENCIA)]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Resumen por niveles
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _resumen(df: pd.DataFrame, por: list[str]) -> pd.DataFrame:
     """
@@ -137,7 +191,40 @@ def _resumen(df: pd.DataFrame, por: list[str]) -> pd.DataFrame:
     for t in (t for t in TASAS if t in ok.columns):
         tabla[(t, "tasa")] = g[t].mean()
     tabla[("tasa_fallo", "")] = fallo
+    tabla[("n", "")] = df.groupby(por).size()
     return tabla.sort_index(axis=1)
+
+
+def tabla_reconstruccion(df: pd.DataFrame,
+                         por: list[str] | None = None) -> pd.DataFrame:
+    """
+    Pregunta 1: como reconstruye CIRCUST tal cual a lo largo de los factores.
+
+    Por defecto se agrupa por muestreo, forma de onda y senal-ruido, que son
+    los factores que mas discriminan. Cualquier otro subconjunto de
+    ``FACTORES`` vale.
+    """
+    ref = _referencia(df)
+    if ref.empty:
+        raise ValueError("no hay filas de la configuracion de referencia")
+    return _resumen(ref, por or ["sampling", "omega", "snr"])
+
+
+def tabla_por_factor(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Efectos principales de la reconstruccion: una fila por factor y nivel,
+    promediando sobre todo lo demas. Es la vista de una sola pagina.
+    """
+    ref = _referencia(df)
+    trozos = []
+    for f in FACTORES:
+        t = _resumen(ref, [f]).reset_index()
+        t.insert(0, "factor", f)
+        t = t.rename(columns={f: "nivel"})
+        trozos.append(t)
+    salida = pd.concat(trozos, ignore_index=True)
+    salida["nivel"] = salida["nivel"].astype(str)
+    return salida.set_index(["factor", "nivel"])
 
 
 def tabla_sin_ruido(df: pd.DataFrame) -> pd.DataFrame:
@@ -148,117 +235,12 @@ def tabla_sin_ruido(df: pd.DataFrame) -> pd.DataFrame:
     del propio algoritmo. Se agrupa por forma de onda y muestreo, que son los
     factores que discriminan.
     """
-    s = df[df["bloque"] == "sin_ruido"]
+    s = _derivadas(df)
+    s = s[s["bloque"] == "sin_ruido"]
     if s.empty:
         raise ValueError("no hay filas del bloque sin_ruido")
     por = [c for c in ("omega", "sampling", "n_samples") if c in s.columns]
     return _resumen(s, por[:2] if len(por) > 1 else por)
-
-
-def tabla_principal(df: pd.DataFrame) -> pd.DataFrame:
-    """Bloque P: reconstruccion por muestreo, morfologia y senal-ruido."""
-    p = df[df["bloque"] == "principal"]
-    if p.empty:
-        raise ValueError("no hay filas del bloque principal")
-    return _resumen(p, ["sampling", "omega", "snr"])
-
-
-def tabla_regularizacion(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Bloque F: diferencia **pareada** entre stabilized y base.
-
-    La diferencia se calcula replica a replica sobre la matriz identica y solo
-    despues se resume. Promediar primero y restar despues perderia toda la
-    potencia del diseno pareado, que es la razon de que los dos bloques
-    compartan semilla de generacion.
-
-    Lleva tambien las medidas del atlas, que son las que de verdad separan a
-    los dos metodos: el orden de muestras sale de una SVD sobre los genes
-    nucleares donde el FMM no interviene, asi que sobre el orden base y
-    estabilizado son identicos por construccion y compararlos ahi seria
-    comparar dos nombres del mismo calculo.
-    """
-    df = _derivadas(df)
-    clave = ["n_samples", "sampling", "omega", "snr", "rep"]
-    base = df[(df["bloque"] == "principal") & (df["status"] == "ok")]
-    stab = df[(df["bloque"] == "regularizacion") & (df["status"] == "ok")]
-    if base.empty or stab.empty:
-        raise ValueError("faltan filas de principal o de regularizacion")
-    par = base.merge(stab, on=clave, suffixes=("_base", "_stab"))
-    if par.empty:
-        raise ValueError("el emparejamiento P contra F no cuadra")
-
-    columnas = []
-    for m in MEDIDAS + TASAS + MEDIDAS_ATLAS:
-        a, b = f"{m}_base", f"{m}_stab"
-        if a in par.columns and b in par.columns:
-            par[f"delta_{m}"] = par[b] - par[a]
-            columnas.append(f"delta_{m}")
-
-    g = par.groupby(["sampling", "omega", "snr"])
-    tabla = _con_nivel(g[columnas].median(), columnas, "mediana")
-    iqr   = _con_nivel(g[columnas].quantile(0.75) - g[columnas].quantile(0.25),
-                       columnas, "iqr")
-    return pd.concat([tabla, iqr], axis=1).sort_index(axis=1)
-
-
-def tabla_atlas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calidad del atlas en NIVELES, base al lado de estabilizado.
-
-    ``tabla_regularizacion`` da la diferencia pareada, que es la que tiene
-    potencia estadistica, pero una diferencia sola no dice si el atlas es
-    utilizable. Esta tabla da los valores absolutos para poder decir, por
-    ejemplo, que a A/sigma=4 el error de pico esta por debajo de la hora con
-    los dos metodos y que la diferencia, aunque significativa, no cambia
-    ninguna conclusion biologica.
-
-    Solo se resumen las filas con la orientacion bien resuelta. Una escala
-    reflejada da un atlas especular, con errores de pico repartidos por todo
-    el ciclo (dispersion de 6,5 h, o sea ninguna informacion), y mezclarlos
-    con los aciertos no promedia dos calidades sino dos regimenes distintos.
-    La fraccion excluida ya es un resultado por si misma y sale en
-    ``orientacion_ok`` de las demas tablas.
-    """
-    g = _derivadas(df)
-    g = g[g["bloque"].isin(("principal", "regularizacion"))]
-    g = g[(g["status"] == "ok") & (g["orientacion_ok"] == 1.0)]
-    if g.empty:
-        raise ValueError(
-            "no hay filas con orientacion resuelta en principal ni en "
-            "regularizacion"
-        )
-    medidas = [m for m in MEDIDAS_ATLAS if m in g.columns]
-    por = ["snr", "omega", "fmm_method"]
-    gr = g.groupby(por)
-    tabla = _con_nivel(gr[medidas].median(), medidas, "mediana")
-    iqr   = _con_nivel(gr[medidas].quantile(0.75) - gr[medidas].quantile(0.25),
-                       medidas, "iqr")
-    tabla[("n_celdas", "")] = gr.size()
-    return pd.concat([tabla], axis=1).sort_index(axis=1)
-
-
-def tabla_agregacion(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Bloque G: metodos de resumen de las K, separados por cantidad de senal.
-
-    ``prop_rhythmic`` es el eje que gobierna el desacuerdo entre las K
-    repeticiones. Sin variarlo los metodos empatan por construccion, porque
-    donde las K coinciden cualquier resumen devuelve el mismo orden.
-    """
-    g = df[df["bloque"] == "agregacion"]
-    if g.empty:
-        raise ValueError("no hay filas del bloque agregacion")
-    return _resumen(g, ["prop_rhythmic", "snr", "robust_method",
-                        "selection_criterion", "aggregation"])
-
-
-def tabla_gcore(df: pd.DataFrame) -> pd.DataFrame:
-    """Bloque G_core: cuanto conocimiento a priori hace falta."""
-    g = df[df["bloque"] == "gcore"]
-    if g.empty:
-        raise ValueError("no hay filas del bloque gcore")
-    return _resumen(g, ["n_core", "snr"])
 
 
 def tabla_invariancia(df: pd.DataFrame) -> pd.DataFrame:
@@ -268,20 +250,253 @@ def tabla_invariancia(df: pd.DataFrame) -> pd.DataFrame:
     Los dos miembros de cada par tienen el mismo cociente y distinta escala
     absoluta, asi que deben dar metricas identicas.
     """
-    inv = df[(df["bloque"] == "invariancia") & (df["status"] == "ok")]
+    inv = _derivadas(df)
+    inv = inv[(inv["bloque"] == "invariancia") & (inv["status"] == "ok")]
     if inv.empty:
         raise ValueError("no hay filas del bloque invariancia")
-    return inv.groupby(["snr", "sigma"])[MEDIDAS].median()
+    medidas = [m for m in MEDIDAS if m in inv.columns]
+    return inv.groupby(["snr", "sigma"])[medidas].median()
+
+
+def tabla_atlas(df: pd.DataFrame,
+                metodo: str = METODO_REFERENCIA) -> pd.DataFrame:
+    """
+    Calidad del atlas en NIVELES, base al lado de estabilizado.
+
+    ``contraste_fmm`` da la diferencia pareada, que es la que tiene potencia,
+    pero una diferencia sola no dice si el atlas es utilizable. Esta tabla
+    da los valores absolutos para poder decir, por ejemplo, que a A/sigma=4
+    el error de pico esta por debajo de la hora con los dos metodos.
+
+    Solo se resumen las filas con la orientacion bien resuelta. Una escala
+    reflejada da un atlas especular, con errores de pico repartidos por todo
+    el ciclo, y mezclarlos con los aciertos no promedia dos calidades sino
+    dos regimenes distintos.
+    """
+    g = _rejilla(df)
+    g = g[(g["metodo"] == metodo) & (g["status"] == "ok")
+          & (g["orientacion_ok"] == 1.0)]
+    if g.empty:
+        raise ValueError("no hay filas con orientacion resuelta en la rejilla")
+    medidas = [m for m in MEDIDAS_ATLAS if m in g.columns]
+    por = ["snr", "omega", "fmm_method"]
+    gr = g.groupby(por)
+    tabla = _con_nivel(gr[medidas].median(), medidas, "mediana")
+    iqr   = _con_nivel(gr[medidas].quantile(0.75) - gr[medidas].quantile(0.25),
+                       medidas, "iqr")
+    tabla[("n_celdas", "")] = gr.size()
+    return pd.concat([tabla, iqr], axis=1).sort_index(axis=1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Contrastes pareados
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _emparejar(a: pd.DataFrame, b: pd.DataFrame, medidas: list[str],
+               sufijos: tuple[str, str]) -> pd.DataFrame:
+    """
+    Une dos brazos replica a replica y calcula ``delta_<medida>`` como
+    ``b - a``. Solo entran las replicas con ``status == ok`` en los dos
+    brazos: una replica que fallo en uno no tiene con que emparejarse.
+    """
+    a = a[a["status"] == "ok"]
+    b = b[b["status"] == "ok"]
+    if a.empty or b.empty:
+        raise ValueError("uno de los dos brazos del contraste esta vacio")
+    columnas = CLAVE_REPLICA + [m for m in medidas if m in a.columns]
+    par = a[columnas].merge(b[columnas], on=CLAVE_REPLICA, suffixes=sufijos)
+    if par.empty:
+        raise ValueError("el emparejamiento no cuadra, revisa las semillas")
+    for m in medidas:
+        ca, cb = f"{m}{sufijos[0]}", f"{m}{sufijos[1]}"
+        if ca in par.columns and cb in par.columns:
+            par[f"delta_{m}"] = par[cb] - par[ca]
+    return par
+
+
+def contraste_fmm(df: pd.DataFrame, metodo: str = METODO_REFERENCIA,
+                  solo_orientadas: bool = True) -> pd.DataFrame:
+    """
+    Pregunta 2: estabilizado menos base, pareado, con el metodo de resumen
+    fijo.
+
+    El orden de muestras sale de una SVD sobre los genes nucleares donde el
+    FMM no interviene, asi que sobre el orden los dos son casi identicos por
+    construccion. Donde se diferencian es en el atlas, y por eso las medidas
+    del atlas van delante. Las de orden se conservan como comprobacion.
+
+    Con ``solo_orientadas`` se exige que la orientacion este resuelta en los
+    DOS brazos: una escala reflejada da un atlas especular, que es otro
+    regimen y no una calidad peor.
+    """
+    r = _rejilla(df)
+    r = r[r["metodo"] == metodo]
+    medidas = MEDIDAS_ATLAS + MEDIDAS_ORDEN + ["orientacion_ok", "t_total_s"]
+    par = _emparejar(r[r["fmm_method"] == "base"],
+                     r[r["fmm_method"] == "stabilized"],
+                     medidas, ("_base", "_stab"))
+    if solo_orientadas:
+        par = par[(par["orientacion_ok_base"] == 1.0)
+                  & (par["orientacion_ok_stab"] == 1.0)]
+    return par.reset_index(drop=True)
+
+
+def contraste_metodos(df: pd.DataFrame, fmm: str = FMM_REFERENCIA,
+                      referencia: str = METODO_REFERENCIA) -> pd.DataFrame:
+    """
+    Pregunta 3: cada metodo de resumen menos la referencia, pareado, con el
+    FMM fijo.
+
+    Devuelve un DataFrame largo con una columna ``metodo`` y los
+    ``delta_<medida>`` de ese metodo contra la referencia en la misma
+    replica. Negativo en el error significa que el metodo gana.
+    """
+    r = _rejilla(df)
+    r = r[r["fmm_method"] == fmm]
+    ref = r[r["metodo"] == referencia]
+    medidas = MEDIDAS_ORDEN + ["orientacion_ok", "desacuerdo_K", "t_robust_s"]
+    trozos = []
+    for metodo, sub in r.groupby("metodo"):
+        if metodo == referencia:
+            continue
+        par = _emparejar(ref, sub, medidas, ("_ref", "_met"))
+        par.insert(0, "metodo", metodo)
+        trozos.append(par)
+    if not trozos:
+        raise ValueError("no hay metodos distintos de la referencia")
+    return pd.concat(trozos, ignore_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lecturas de un contraste
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _resumir_delta(d: pd.Series) -> dict:
+    d = d.dropna()
+    if d.empty:
+        return dict(n=0, mediana=np.nan, iqr=np.nan, tasa_victorias=np.nan)
+    return dict(
+        n              = int(d.size),
+        mediana        = float(d.median()),
+        iqr            = float(d.quantile(0.75) - d.quantile(0.25)),
+        # la fraccion de replicas donde el brazo nuevo mejora (delta < 0).
+        # Un delta mediano pequeno con el 100 % de victorias es una mejora
+        # mas solida que uno grande con el 55 %.
+        tasa_victorias = float((d < 0).mean()),
+    )
+
+
+def efectos_principales(par: pd.DataFrame, medida: str,
+                        factores: list[str] | None = None,
+                        por: list[str] | None = None) -> pd.DataFrame:
+    """
+    Mediana, dispersion y tasa de victorias del delta por nivel de cada
+    factor, promediando sobre los demas.
+
+    ``por`` permite separar ademas por una columna extra, por ejemplo
+    ``["metodo"]`` en el contraste de metodos.
+    """
+    col = f"delta_{medida}"
+    if col not in par.columns:
+        raise KeyError(f"no existe la columna {col}")
+    factores = factores or FACTORES
+    extra = por or []
+    filas = []
+    for f in factores:
+        for claves, g in par.groupby(extra + [f]):
+            claves = claves if isinstance(claves, tuple) else (claves,)
+            fila = dict(zip(extra, claves[:-1]))
+            fila.update(factor=f, nivel=str(claves[-1]))
+            fila.update(_resumir_delta(g[col]))
+            filas.append(fila)
+    tabla = pd.DataFrame(filas)
+    return tabla.set_index(extra + ["factor", "nivel"])
+
+
+def interaccion(par: pd.DataFrame, medida: str, fila: str, columna: str,
+                estadistico: str = "mediana") -> pd.DataFrame:
+    """
+    Mapa de dos factores: mediana del delta o tasa de victorias.
+
+    Filas ``fila``, columnas ``columna``, promediando sobre el resto.
+    """
+    col = f"delta_{medida}"
+    if estadistico == "mediana":
+        return par.pivot_table(index=fila, columns=columna, values=col,
+                               aggfunc="median")
+    if estadistico == "victorias":
+        return par.assign(gana=lambda x: (x[col] < 0).astype(float)) \
+                  .pivot_table(index=fila, columns=columna, values="gana")
+    raise ValueError(f"estadistico desconocido: {estadistico!r}")
+
+
+def modelo_lineal(par: pd.DataFrame, medida: str,
+                  factores: list[str] | None = None) -> pd.DataFrame:
+    """
+    Regresion del delta sobre los factores como categoricos, sin
+    interacciones. Responde con numeros a que factores modulan la mejora.
+
+    Cada coeficiente es el cambio del delta al pasar del nivel de referencia
+    (el menor de cada factor) al nivel indicado, a igualdad del resto. Se
+    reporta con su error tipico y su p-valor, y el R2 del modelo dice cuanta
+    de la variacion del delta explican los factores en conjunto. Es un
+    modelo descriptivo: las replicas de una celda no son independientes del
+    todo, asi que los p-valores son orientativos y lo que hay que mirar es
+    la magnitud y el signo.
+    """
+    import statsmodels.formula.api as smf
+
+    col = f"delta_{medida}"
+    factores = factores or FACTORES
+    datos = par[[col] + factores].dropna().copy()
+    if datos.empty:
+        raise ValueError(f"no hay datos para el modelo de {col}")
+    for f in factores:
+        datos[f] = datos[f].astype(str)
+    datos = datos.rename(columns={col: "delta"})
+    formula = "delta ~ " + " + ".join(f"C({f})" for f in factores)
+    ajuste = smf.ols(formula, data=datos).fit()
+    tabla = pd.DataFrame({
+        "coef": ajuste.params,
+        "error_tipico": ajuste.bse,
+        "p": ajuste.pvalues,
+    })
+    tabla.attrs["r2"] = float(ajuste.rsquared)
+    tabla.attrs["n"] = int(ajuste.nobs)
+    return tabla
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tiempos
+# ═══════════════════════════════════════════════════════════════════════════
+
+def tabla_tiempos_python(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Coste en Python por variante del FMM, metodo de resumen y tamano.
+
+    Las etapas 0 a 3 son comunes a los metodos de resumen, asi que su tiempo
+    se repite en las cinco filas de un grupo. ``t_robust_s`` es lo unico que
+    cambia entre metodos.
+    """
+    r = _rejilla(df)
+    r = r[r["status"] == "ok"]
+    tiempos = [t for t in TIEMPOS if t in r.columns]
+    return r.groupby(["fmm_method", "metodo", "n_genes", "n_samples"])[
+        tiempos].median()
 
 
 def tabla_tiempos(df_tiempos: pd.DataFrame) -> pd.DataFrame:
-    """Bloque C: tiempo por implementacion y tamano de matriz."""
+    """Bloque C: tiempo por implementacion y tamano de matriz, R contra Python."""
     agg   = df_tiempos.groupby(["implementacion", "n_genes", "n_samples"])
     ancho = agg["t_total_s"].median().unstack("implementacion")
     if {"python", "r"} <= set(ancho.columns):
         ancho["factor_r_sobre_python"] = ancho["r"] / ancho["python"]
     return ancho
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Calibracion del aviso de orientacion
+# ═══════════════════════════════════════════════════════════════════════════
 
 def calibracion_orientacion(df: pd.DataFrame, indicador: str = "evidencia",
                             n_tramos: int = 8) -> pd.DataFrame:
@@ -294,7 +509,8 @@ def calibracion_orientacion(df: pd.DataFrame, indicador: str = "evidencia",
     que esperar para cada valor. El umbral no se fija aqui, se elige mirando
     la curva con un criterio explicito de precision y cobertura.
     """
-    s = df[(df["status"] == "ok") & df[indicador].notna()].copy()
+    s = _derivadas(df)
+    s = s[(s["status"] == "ok") & s[indicador].notna()].copy()
     if s.empty:
         raise ValueError(f"no hay filas con {indicador} definido")
     s["tramo"] = pd.qcut(s[indicador], n_tramos, duplicates="drop")
@@ -307,18 +523,27 @@ def calibracion_orientacion(df: pd.DataFrame, indicador: str = "evidencia",
     })
 
 
-def _figura(datos, x, y, hue, titulo, xlabel, ylabel, out: Path,
-            logx: bool = True) -> None:
-    """Grafico de lineas con una serie por nivel de ``hue``."""
+# ═══════════════════════════════════════════════════════════════════════════
+# Figuras
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _mpl():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.size": 9, "figure.dpi": 160,
+                         "savefig.bbox": "tight"})
+    return plt
 
+
+def _figura_lineas(datos, x, y, hue, titulo, xlabel, ylabel, out: Path,
+                   logx: bool = True) -> None:
+    """Grafico de lineas con una serie por nivel de ``hue``."""
     # Sin esto se escribian PNG vacios cuando el bloque todavia no se habia
     # ejecutado, y un fichero vacio parece una figura valida.
     if len(datos) == 0:
         raise ValueError(f"no hay datos para la figura {out.name}")
-
+    plt = _mpl()
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
     for nivel, sub in datos.groupby(hue):
         sub = sub.sort_values(x)
@@ -332,52 +557,81 @@ def _figura(datos, x, y, hue, titulo, xlabel, ylabel, out: Path,
     ax.grid(alpha=0.25)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=200)
+    fig.savefig(out)
     plt.close(fig)
 
 
 def figura_snr(df: pd.DataFrame, out: Path) -> None:
     """Degradacion del error con la senal-ruido, una serie por muestreo."""
-    p = df[(df["bloque"] == "principal") & (df["status"] == "ok")]
+    p = _referencia(df)
+    p = p[p["status"] == "ok"]
     datos = p.groupby(["sampling", "snr"])["medae_h"].median().reset_index()
-    _figura(datos, "snr", "medae_h", "sampling",
-            "Reconstruccion frente a la razon senal-ruido",
-            "A / sigma", "Mediana del error absoluto (h)", out)
+    _figura_lineas(datos, "snr", "medae_h", "sampling",
+                   "Reconstruccion frente a la razon senal-ruido",
+                   "A / sigma", "Mediana del error absoluto (h)", out)
 
 
 def figura_orientacion(df: pd.DataFrame, out: Path) -> None:
     """Tasa de acierto de orientacion, que va aparte del error."""
-    p = df[(df["bloque"] == "principal") & (df["status"] == "ok")]
+    p = _referencia(df)
+    p = p[p["status"] == "ok"]
     datos = p.groupby(["omega", "snr"])["orientacion_ok"].mean().reset_index()
-    _figura(datos, "snr", "orientacion_ok", "omega",
-            "Acierto del sentido de giro",
-            "A / sigma", "Proporcion de celdas bien orientadas", out)
+    _figura_lineas(datos, "snr", "orientacion_ok", "omega",
+                   "Acierto del sentido de giro",
+                   "A / sigma", "Proporcion de celdas bien orientadas", out)
 
 
-def figura_regularizacion(df: pd.DataFrame, out: Path) -> None:
-    """Ganancia pareada del FMM estabilizado, una serie por omega."""
-    t = tabla_regularizacion(df)[("delta_medae_h", "mediana")].reset_index()
-    t = t.rename(columns={t.columns[-1]: "delta_medae_h"})
-    datos = t.groupby(["omega", "snr"])["delta_medae_h"].median().reset_index()
-    _figura(datos, "snr", "delta_medae_h", "omega",
-            "Ganancia del FMM estabilizado (negativo es mejor)",
-            "A / sigma", "Diferencia pareada de mediana del error (h)", out)
+def figura_efectos(par: pd.DataFrame, medida: str, titulo: str,
+                   ylabel: str, out: Path, por: str | None = None) -> None:
+    """
+    Efectos principales de un contraste: un panel por factor, la mediana del
+    delta por nivel con su rango intercuartilico. Con ``por`` se dibuja una
+    serie por nivel de esa columna (por ejemplo, por metodo).
+    """
+    col = f"delta_{medida}"
+    if col not in par.columns or par[col].dropna().empty:
+        raise ValueError(f"no hay datos para la figura {out.name}")
+    plt = _mpl()
+    fig, axes = plt.subplots(1, len(FACTORES), figsize=(2.3 * len(FACTORES), 3.2),
+                             sharey=True)
+    series = [None] if por is None else sorted(par[por].unique())
+    for ax, f in zip(axes, FACTORES):
+        for i, s in enumerate(series):
+            sub = par if s is None else par[par[por] == s]
+            g = sub.groupby(f)[col]
+            m, q1, q3 = g.median(), g.quantile(0.25), g.quantile(0.75)
+            x = np.arange(len(m)) + (0 if s is None else (i - len(series) / 2) * 0.12)
+            ax.errorbar(x, m.values, yerr=[m.values - q1.values, q3.values - m.values],
+                        fmt="o", ms=4, capsize=2,
+                        label=None if s is None else str(s))
+        ax.set_xticks(np.arange(len(m)), [f"{v:g}" if isinstance(v, float) else str(v)
+                                          for v in m.index], rotation=45)
+        ax.axhline(0, color="0.4", lw=0.8, ls="--")
+        ax.set_title(f, fontsize=9)
+    axes[0].set_ylabel(ylabel)
+    if por is not None:
+        axes[-1].legend(frameon=False, fontsize=7, title=por)
+    fig.suptitle(titulo, fontsize=10)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out)
+    plt.close(fig)
 
 
-def figura_agregacion(df: pd.DataFrame, out: Path) -> None:
-    """Comparacion de metodos de resumen, una serie por metodo."""
-    g = df[(df["bloque"] == "agregacion") & (df["status"] == "ok")].copy()
-    g["metodo"] = np.where(
-        g["robust_method"] == "best_k",
-        "best_k:" + g["selection_criterion"].astype(str),
-        "aggregate:" + g["aggregation"].astype(str),
-    )
-    datos = (g.groupby(["metodo", "prop_rhythmic"])["medae_h"]
-               .median().reset_index()
-               .rename(columns={"prop_rhythmic": "prop"}))
-    _figura(datos, "prop", "medae_h", "metodo",
-            "Metodos de resumen de las K repeticiones",
-            "Proporcion de genes ritmicos", "Mediana del error absoluto (h)", out)
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _escribir(nombre: str, fn, destino: Path) -> None:
+    try:
+        t = fn()
+        t.to_csv(destino / f"{nombre}.csv")
+        extra = ""
+        if "r2" in t.attrs:
+            extra = f" (R2 = {t.attrs['r2']:.3f}, n = {t.attrs['n']})"
+        print(f"  escrita {nombre}.csv{extra}")
+    except (KeyError, ValueError) as exc:
+        print(f"  {nombre} omitida: {exc}")
 
 
 def main() -> None:
@@ -394,46 +648,66 @@ def main() -> None:
     entrada = Path(args.entrada)
     df = load(entrada / "resultados.csv")
 
-    dir_tablas = Path(args.salida) / "tablas"
-    dir_tablas.mkdir(parents=True, exist_ok=True)
+    tablas = Path(args.salida) / "tablas"
+    tablas.mkdir(parents=True, exist_ok=True)
+    imagenes = Path(args.images)
 
-    constructores = {
-        "sin_ruido":      tabla_sin_ruido,
-        "principal":      tabla_principal,
-        "regularizacion": tabla_regularizacion,
-        "atlas":          tabla_atlas,
-        "agregacion":     tabla_agregacion,
-        "gcore":          tabla_gcore,
-        "invariancia":    tabla_invariancia,
-    }
-    for nombre, fn in constructores.items():
-        try:
-            fn(df).to_csv(dir_tablas / f"tabla_{nombre}.csv")
-            print(f"  escrita tabla_{nombre}.csv")
-        except (KeyError, ValueError) as exc:
-            print(f"  tabla_{nombre} omitida: {exc}")
+    # Pregunta 1
+    _escribir("tabla_reconstruccion", lambda: tabla_reconstruccion(df), tablas)
+    _escribir("tabla_por_factor",     lambda: tabla_por_factor(df), tablas)
+    _escribir("tabla_sin_ruido",      lambda: tabla_sin_ruido(df), tablas)
+    _escribir("tabla_invariancia",    lambda: tabla_invariancia(df), tablas)
+    _escribir("tabla_atlas",          lambda: tabla_atlas(df), tablas)
+    _escribir("tabla_tiempos_python", lambda: tabla_tiempos_python(df), tablas)
+
+    # Pregunta 2: el FMM estabilizado
+    try:
+        fmm = contraste_fmm(df)
+        for m in MEDIDAS_ATLAS + MEDIDAS_ORDEN:
+            _escribir(f"fmm_efectos_{m}", lambda m=m: efectos_principales(fmm, m), tablas)
+            _escribir(f"fmm_modelo_{m}",  lambda m=m: modelo_lineal(fmm, m), tablas)
+        _escribir("fmm_interaccion_n_snr",
+                  lambda: interaccion(fmm, "atlas_rmse_curva", "n_samples", "snr"),
+                  tablas)
+        _escribir("fmm_interaccion_omega_n",
+                  lambda: interaccion(fmm, "atlas_rmse_curva", "omega", "n_samples"),
+                  tablas)
+        figura_efectos(fmm, "atlas_rmse_curva",
+                       "FMM estabilizado menos base (negativo = mejora)",
+                       "delta RMSE de la curva", imagenes / "sim-fmm-efectos.png")
+        print("  escrita sim-fmm-efectos.png")
+    except (KeyError, ValueError) as exc:
+        print(f"  contraste FMM omitido: {exc}")
+
+    # Pregunta 3: los metodos de resumen
+    try:
+        met = contraste_metodos(df)
+        for m in MEDIDAS_ORDEN:
+            _escribir(f"metodos_efectos_{m}",
+                      lambda m=m: efectos_principales(met, m, por=["metodo"]), tablas)
+        for metodo, sub in met.groupby("metodo"):
+            corto = metodo.replace(":", "_")
+            _escribir(f"metodos_modelo_{corto}",
+                      lambda sub=sub: modelo_lineal(sub, "mae_h_oracle"), tablas)
+        figura_efectos(met, "mae_h_oracle",
+                       "Metodo de resumen menos best_k:r2_median (negativo = mejora)",
+                       "delta MAE del oraculo (h)", imagenes / "sim-metodos-efectos.png",
+                       por="metodo")
+        print("  escrita sim-metodos-efectos.png")
+    except (KeyError, ValueError) as exc:
+        print(f"  contraste de metodos omitido: {exc}")
 
     for indicador in ("evidencia", "r2_anchor"):
-        try:
-            calibracion_orientacion(df, indicador).to_csv(
-                dir_tablas / f"calibracion_{indicador}.csv")
-            print(f"  escrita calibracion_{indicador}.csv")
-        except (KeyError, ValueError) as exc:
-            print(f"  calibracion_{indicador} omitida: {exc}")
+        _escribir(f"calibracion_{indicador}",
+                  lambda i=indicador: calibracion_orientacion(df, i), tablas)
 
     ruta_tiempos = entrada / "tiempos.csv"
     if ruta_tiempos.exists():
-        tabla_tiempos(pd.read_csv(ruta_tiempos)).to_csv(
-            dir_tablas / "tabla_tiempos.csv")
-        print("  escrita tabla_tiempos.csv")
+        _escribir("tabla_tiempos",
+                  lambda: tabla_tiempos(pd.read_csv(ruta_tiempos)), tablas)
 
-    imagenes = Path(args.images)
-    for nombre, fn in (
-        ("sim-snr",            figura_snr),
-        ("sim-orientacion",    figura_orientacion),
-        ("sim-regularizacion", figura_regularizacion),
-        ("sim-agregacion",     figura_agregacion),
-    ):
+    for nombre, fn in (("sim-snr", figura_snr),
+                       ("sim-orientacion", figura_orientacion)):
         try:
             fn(df, imagenes / f"{nombre}.png")
             print(f"  escrita {nombre}.png")
