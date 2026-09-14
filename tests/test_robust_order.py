@@ -17,6 +17,7 @@ el 100 %. Frente a la alternativa por tripletes, que tambien acierta el
 import numpy as np
 import pytest
 
+from circust.fitting.fmm import FMMModel
 from circust.robust_order import (
     RobustOrderEstimator, _build_theta, _fisher_lee,
 )
@@ -51,8 +52,9 @@ def test_fisher_lee_identifica_la_rep_invertida():
 def test_fix_orientations_corrige_la_rep_invertida():
     theta_pre, ordenes, escalas = _escenario()
     est = RobustOrderEstimator(n_reps=2, verbose=False)
-    o_fix, e_fix = est._fix_orientations(ordenes, escalas, theta_pre,
-                                         theta_pre.size)
+    o_fix, e_fix, _, _ = est._fix_orientations(
+        ordenes, escalas, None, None,
+        theta_pre, theta_pre.size)
     Theta = _build_theta(o_fix, e_fix, theta_pre.size)
     assert _fisher_lee(Theta[0], theta_pre) > 0.8
     assert _fisher_lee(Theta[1], theta_pre) > 0.8, (
@@ -69,7 +71,8 @@ def test_fix_orientations_no_toca_lo_que_ya_esta_bien():
     escalas = np.vstack([e for _, e in reps])
 
     est = RobustOrderEstimator(n_reps=3, verbose=False)
-    o_fix, e_fix = est._fix_orientations(ordenes, escalas, theta_pre, n)
+    o_fix, e_fix, _, _ = est._fix_orientations(
+        ordenes, escalas, None, None, theta_pre, n)
     assert np.array_equal(o_fix, ordenes)
     assert np.allclose(e_fix, escalas)
 
@@ -125,3 +128,68 @@ def test_run_pipeline_no_recalibra_lambda():
     assert "recalibrate_lambda_per_rep" in fuente, (
         "run_pipeline deberia fijarlo explicitamente, no depender del default"
     )
+
+
+# ---------------------------------------------------------------------------
+# La correccion de orientacion tiene que alcanzar tambien al atlas
+# ---------------------------------------------------------------------------
+
+def test_corregir_la_orientacion_refleja_tambien_los_parametros_fmm():
+    """
+    ``_fix_orientations`` invierte el orden de muestras y refleja la escala de
+    las repeticiones que salieron al reves. Los parametros FMM de esas
+    repeticiones estan expresados en la escala de ANTES, asi que hay que
+    reflejarlos igual o el atlas queda especular respecto del orden que se
+    publica junto a el.
+
+    Bajo theta -> 2*pi - theta la onda FMM se transforma como
+    ``(alpha, beta, omega) -> (-alpha, -beta, omega)``, de donde pico y valle
+    tambien cambian de signo. M, A y R2 no se tocan: la reflexion no cambia
+    ni la escala vertical ni la bondad del ajuste.
+    """
+    import numpy as np
+    from circust.robust_order import RobustOrderEstimator
+
+    n_samp, n_top, K = 12, 3, 2
+    est = RobustOrderEstimator(n_reps=K, verbose=False)
+
+    # rep 0 concuerda con el preliminar, rep 1 esta invertida
+    theta_pre = np.linspace(0.0, 2 * np.pi, n_samp, endpoint=False)
+    sample_orders = np.array([np.arange(n_samp), np.arange(n_samp)])
+    circ_scales   = np.array([theta_pre.copy(), (2 * np.pi - theta_pre) % (2 * np.pi)])
+
+    stats = np.zeros((K * n_top, 12))
+    for k in range(K):
+        for i in range(n_top):
+            alpha, beta, omega = 1.0 + 0.3 * i, 2.0 + 0.2 * i, 0.6
+            stats[k * n_top + i, 0] = 5.0            # M
+            stats[k * n_top + i, 1] = 2.0            # A
+            stats[k * n_top + i, 2] = alpha
+            stats[k * n_top + i, 3] = beta
+            stats[k * n_top + i, 4] = omega
+            stats[k * n_top + i, 5] = FMMModel.peak_time(alpha, beta, omega)
+            stats[k * n_top + i, 6] = FMMModel.trough_time(alpha, beta, omega)
+            stats[k * n_top + i, 11] = 0.9           # R2
+
+    so, cs, st, _ = est._fix_orientations(
+        sample_orders, circ_scales, stats.copy(), None,
+        theta_pre=theta_pre, n_samp=n_samp,
+    )
+
+    dos_pi = 2 * np.pi
+    for i in range(n_top):
+        # la rep 0 no se toca
+        np.testing.assert_allclose(st[i, :], stats[i, :])
+        # la rep 1 sale reflejada
+        f, o = st[n_top + i], stats[n_top + i]
+        assert f[2] == pytest.approx((-o[2]) % dos_pi)      # alpha
+        assert f[3] == pytest.approx((-o[3]) % dos_pi)      # beta
+        assert f[4] == pytest.approx(o[4])                  # omega intacta
+        assert f[5] == pytest.approx((-o[5]) % dos_pi)      # pico
+        assert f[6] == pytest.approx((-o[6]) % dos_pi)      # valle
+        assert f[0] == pytest.approx(o[0])                  # M intacta
+        assert f[1] == pytest.approx(o[1])                  # A intacta
+        assert f[11] == pytest.approx(o[11])                # R2 intacto
+        # pico y valle siguen siendo los de los parametros reflejados
+        assert f[5] == pytest.approx(FMMModel.peak_time(f[2], f[3], f[4]))
+        assert f[6] == pytest.approx(FMMModel.trough_time(f[2], f[3], f[4]))

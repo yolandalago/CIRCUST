@@ -631,11 +631,12 @@ class RobustOrderEstimator:
             )
 
         # ── Fase A.2b: correccion de orientaciones ────────────────────
-        sample_orders, circ_scales = self._fix_orientations(
-            sample_orders, circ_scales,
-            theta_pre = theta_pre,
-            n_samp    = n_samp,
-        )
+        sample_orders, circ_scales, stats_table, per_rep_fmm = \
+            self._fix_orientations(
+                sample_orders, circ_scales, stats_table, per_rep_fmm,
+                theta_pre = theta_pre,
+                n_samp    = n_samp,
+            )
 
         # ── Fase A.3: Mediana R² por rep ──────────────────────────────
         median_r2 = self._compute_median_r2(
@@ -1036,9 +1037,11 @@ class RobustOrderEstimator:
         self,
         sample_orders: np.ndarray,
         circ_scales:   np.ndarray,
+        stats_table:   np.ndarray | None,
+        per_rep_fmm:   list | None,
         theta_pre:     np.ndarray,
         n_samp:        int,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, list | None]:
         """Corrige las repeticiones cuya orientacion salio invertida.
 
         La etapa de sincronizacion resuelve por separado el sentido de recorrido
@@ -1072,6 +1075,29 @@ class RobustOrderEstimator:
         la escala, y nunca el origen. Rotar destruiria el anclaje biologico que
         la sincronizacion acaba de fijar situando el pico del gen ancla en pi.
 
+        Que se refleja
+        --------------
+        La escala de muestras no es lo unico expresado en la orientacion
+        antigua. Los parametros FMM por gen de esa repeticion, que son los que
+        acaban en el atlas, tambien lo estan, y hay que reflejarlos aqui o el
+        atlas sale especular respecto del orden que se publica a su lado.
+        Bajo ``theta -> 2*pi - theta`` la onda FMM se transforma como::
+
+            (M, A, alpha, beta, omega) -> (M, A, -alpha, -beta, omega)
+
+        porque la tangente es impar, de modo que ``2*arctan(omega*tan(
+        (-theta-alpha)/2)) = -2*arctan(omega*tan((theta+alpha)/2))`` y el
+        signo pasa dentro del coseno, que es par. M y A no cambian, y R2
+        tampoco: reflejar el eje temporal no altera el residuo. Pico y valle
+        se recalculan de los parametros ya reflejados en vez de negarlos, que
+        daria lo mismo pero por un camino que puede separarse del modelo.
+
+        Sin esta parte el atlas quedaba invertido siempre que la correccion
+        actuaba sobre la repeticion elegida. Medido en simulacion con n=48 y
+        A/sigma=4, un caso en que el orden sale practicamente perfecto
+        (MAE 0,25 h), el RMSE de la curva del atlas era 0,871 y al reflejarlo
+        bajaba a 0,085.
+
         El orden preliminar sirve de referencia por estar anclado de forma
         independiente. Tomar como referencia la media de las propias K
         repeticiones da el mismo resultado mientras la mayoria este bien
@@ -1088,7 +1114,7 @@ class RobustOrderEstimator:
         theta_pre = np.asarray(theta_pre, dtype=np.float64)
         if theta_pre.size != n_samp:
             self._log("  [orientacion] sin escala preliminar valida; no se corrige.")
-            return sample_orders, circ_scales
+            return sample_orders, circ_scales, stats_table, per_rep_fmm
 
         Theta = _build_theta(sample_orders, circ_scales, n_samp)
         corr  = np.array([_fisher_lee(Theta[k], theta_pre)
@@ -1100,13 +1126,34 @@ class RobustOrderEstimator:
                 f"  [orientacion] las {K} repeticiones concuerdan con el orden "
                 f"preliminar (corr min = {corr.min():+.4f})"
             )
-            return sample_orders, circ_scales
+            return sample_orders, circ_scales, stats_table, per_rep_fmm
 
         so = sample_orders.copy()
         cs = circ_scales.copy()
+        st = None if stats_table is None else np.asarray(stats_table).copy()
+        pf = list(per_rep_fmm) if per_rep_fmm is not None else None
+        n_top = (st.shape[0] // K) if (st is not None and K) else 0
+
         for k in invertidas:
             so[k] = sample_orders[k][::-1]
             cs[k] = (2.0 * pi - circ_scales[k][::-1]) % (2.0 * pi)
+
+            # Parametros FMM de la rep, que van al atlas. Ver el docstring.
+            bloque = st[k * n_top:(k + 1) * n_top] if n_top else None
+            if bloque is not None:
+                bloque[:, 2] = (-bloque[:, 2]) % (2.0 * pi)   # alpha
+                bloque[:, 3] = (-bloque[:, 3]) % (2.0 * pi)   # beta
+                for i in range(n_top):
+                    al, be, om = bloque[i, 2], bloque[i, 3], bloque[i, 4]
+                    bloque[i, 5] = FMMModel.peak_time(al, be, om)
+                    bloque[i, 6] = FMMModel.trough_time(al, be, om)
+                    bloque[i, 7] = bloque[i, 5] / (2.0 * pi) * 100.0
+                    bloque[i, 8] = bloque[i, 6] / (2.0 * pi) * 100.0
+
+            # Curvas ajustadas, indexadas por posicion en el orden de muestras
+            if pf is not None and k < len(pf):
+                pf[k] = pf[k].iloc[:, ::-1]
+                pf[k].columns = range(pf[k].shape[1])
 
         self._log(
             f"  AVISO [orientacion]: {invertidas.size}/{K} repeticion(es) "
@@ -1116,7 +1163,7 @@ class RobustOrderEstimator:
             f"etapa de sincronizacion, en particular el gen de direccion "
             f"({self.direction_gene})."
         )
-        return so, cs
+        return so, cs, st, pf
 
     # ==================================================================
     # Fase A.3 — Mediana R² (FMM) por repeticion
