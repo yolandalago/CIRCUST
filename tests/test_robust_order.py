@@ -84,3 +84,44 @@ def test_fisher_lee_es_invariante_a_rotacion():
 
 def test_fisher_lee_con_una_sola_muestra():
     assert np.isnan(_fisher_lee(np.array([0.0]), np.array([0.0])))
+
+
+# ---------------------------------------------------------------------------
+# Calibracion de lambda del FMM estabilizado
+# ---------------------------------------------------------------------------
+
+def test_lambda_no_se_recalibra_por_repeticion_por_defecto():
+    """
+    Recalibrar lambda en cada una de las K repeticiones era el valor por
+    defecto y costaba el 99 % del sobrecoste del FMM estabilizado: 27 s por
+    calibracion, seis por celda, y el bloque de regularizacion pasaba de 4 a
+    20 horas.
+
+    Y no aportaba nada, medido:
+
+    1. La calibracion no determina lambda de forma estable. Sobre la MISMA
+       escala, cambiando solo la semilla del Monte Carlo, devuelve 1,23,
+       1,23, 4,12, 4,12 y 8,76. Esa dispersion (193 %) es MAYOR que la que
+       hay entre repeticiones distintas (150 %), asi que lo que varia entre
+       repeticiones es ruido del estimador, no informacion sobre los datos.
+    2. El valor tampoco cambia el resultado donde el metodo funciona: con
+       omega=0,5 y A/sigma=2, pasar de lambda 1,23 a 8,76 da el mismo orden
+       bit a bit, 0,000 h de diferencia de fase.
+    """
+    est = RobustOrderEstimator(verbose=False)
+    assert est.recalibrate_lambda_per_rep is False
+
+
+def test_run_pipeline_no_recalibra_lambda():
+    """El estudio y la herramienta tienen que ejecutar lo mismo."""
+    import inspect
+    import sys
+    from pathlib import Path
+    raiz = Path(__file__).resolve().parent.parent
+    if str(raiz / "scripts") not in sys.path:
+        sys.path.insert(0, str(raiz / "scripts"))
+    import run_pipeline
+    fuente = inspect.getsource(run_pipeline)
+    assert "recalibrate_lambda_per_rep" in fuente, (
+        "run_pipeline deberia fijarlo explicitamente, no depender del default"
+    )

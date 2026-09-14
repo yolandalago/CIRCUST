@@ -538,6 +538,12 @@ def main() -> None:
         fmm_num_reps         = cfg["fmm_reps"],
         fmm_method           = args.fmm_method,
         lambda_star          = cpca_result.lambda_star,   # heredado si stabilized
+        # Lambda se calibra UNA vez en el CPCA y se hereda. Recalibrarla por
+        # repeticion costaba el 99 % del sobrecoste del FMM estabilizado y no
+        # aportaba: sobre la misma escala, cambiando solo la semilla del Monte
+        # Carlo, devuelve de 1,23 a 8,76, y esa dispersion supera a la que hay
+        # entre repeticiones distintas. Ver el docstring del parametro.
+        recalibrate_lambda_per_rep = False,
         n_jobs               = -1,   # paralelo: el ajuste FMM por gen es el cuello de botella
         seed                 = args.seed,
         verbose              = True,

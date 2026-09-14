@@ -467,8 +467,28 @@ class RobustOrderEstimator:
     lambda_star : float | None
         Lambda heredado de CPCA (modo stab) — evita recalibrar.
     recalibrate_lambda_per_rep : bool
-        Si True (default), recalibra lambda por rep. Si False, reusa
-        ``lambda_star``.
+        Si True, recalibra lambda del FMM estabilizado en cada una de las K
+        repeticiones. Si False (default), reusa el ``lambda_star`` heredado
+        del CPCA.
+
+        El default es False porque recalibrar cuesta mucho y no aporta nada,
+        las dos cosas medidas:
+
+        **No aporta.** La calibracion por Monte Carlo no determina lambda de
+        forma estable. Sobre la MISMA escala, cambiando solo la semilla,
+        devuelve 1,23, 1,23, 4,12, 4,12 y 8,76: un factor 7. Esa dispersion
+        (193 %) es MAYOR que la que hay entre repeticiones distintas (150 %),
+        de modo que lo que varia entre repeticiones es ruido del estimador y
+        no informacion sobre los datos. Y el valor tampoco cambia el
+        resultado donde el metodo funciona: con omega=0,5 y A/sigma=2, pasar
+        de lambda 1,23 a 8,76 da el mismo orden bit a bit. Solo mueve algo
+        con omega=0,1, donde el conjunto TOP ya ha colapsado y el resultado
+        es incorrecto con los tres valores.
+
+        **Cuesta.** Cada calibracion son 27 s y se hacian seis por celda, una
+        en el CPCA y una por repeticion: el 99 % del sobrecoste del FMM
+        estabilizado. Perfilado de la Etapa 4: 132,7 s de 135,7 s en
+        prepare_dataset, con 600 llamadas a _simulate_spikes_vectorized.
     n_jobs : int
         Workers para ajuste paralelo de genes (-1 = todos).
     seed : int | None
@@ -495,7 +515,7 @@ class RobustOrderEstimator:
         fmm_method:            str   = "base",
         fmm_stab_kwargs:       dict|None  = None,
         lambda_star:           float|None = None,
-        recalibrate_lambda_per_rep: bool   = True,
+        recalibrate_lambda_per_rep: bool   = False,
         n_jobs:                int   = 1,
         seed:                  int|None   = None,
         verbose:               bool  = True,
