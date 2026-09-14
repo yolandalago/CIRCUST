@@ -65,8 +65,8 @@ METODOS_RESUMEN: list[RobustConfig] = [
 SIGMA_SIN_RUIDO = 1e-6
 
 BLOQUES = (
-    "sin_ruido", "piloto", "principal", "regularizacion", "agregacion",
-    "gcore", "invariancia", "computacional",
+    "sin_ruido", "sin_ruido_stab", "piloto", "principal", "regularizacion",
+    "agregacion", "gcore", "invariancia", "computacional",
 )
 
 
@@ -162,12 +162,19 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
     por_defecto = RobustConfig()
     celdas: list[Cell] = []
 
-    if bloque == "sin_ruido":
+    if bloque in ("sin_ruido", "sin_ruido_stab"):
         # Verificacion de que el pipeline reconstruye el orden cuando los
         # datos son perfectos. Factorial completo de los tres factores del
         # bloque principal, sin el eje de senal-ruido, que aqui no aplica.
         # Cualquier error residual no puede venir del ruido, asi que aisla
         # los sesgos del propio algoritmo.
+        #
+        # La variante _stab corre las MISMAS matrices con el FMM estabilizado.
+        # Aisla el sesgo propio de la regularizacion: lo que se vea aqui no
+        # puede ser variabilidad por ruido, porque no hay ruido. Comparte la
+        # semilla de generacion por el mismo motivo que regularizacion con
+        # principal.
+        fmm = "base" if bloque == "sin_ruido" else "stabilized"
         for n in N_NIVELES:
             for muestreo in MUESTREOS:
                 for omega in OMEGAS:
@@ -177,8 +184,9 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
                     cfg = _cfg(n, muestreo, omega, 1.0 / SIGMA_SIN_RUIDO,
                                sigma=SIGMA_SIN_RUIDO)
                     for rep in range(reps):
-                        celdas.append(Cell(bloque, _con_semilla(bloque, cfg, rep),
-                                           GCORE_CENTRAL, "base", por_defecto, rep))
+                        celdas.append(Cell(
+                            bloque, _con_semilla("sin_ruido", cfg, rep),
+                            GCORE_CENTRAL, fmm, por_defecto, rep))
         return celdas
 
     if bloque == "piloto":

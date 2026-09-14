@@ -88,36 +88,8 @@ def _giro_comun(err_rad: np.ndarray) -> float:
     return float(np.arctan2(np.sin(err_rad).mean(), np.cos(err_rad).mean()))
 
 
-def atlas_metrics(
-    ajuste: pd.DataFrame,
-    verdad: pd.DataFrame,
-    quitar_giro: bool = False,
-) -> dict[str, float]:
-    """
-    Compara las ondas del atlas con las verdaderas, gen a gen.
-
-    Parameters
-    ----------
-    ajuste
-        Lo que publica el atlas, una fila por gen seleccionado, con columnas
-        ``gene_name, M, amplitude, alpha, beta, omega``.
-    verdad
-        ``truth.gene_params`` indexado por gen, con ``kind, M, A, alpha,
-        beta, omega``. Los genes de fondo no tienen onda verdadera, asi que
-        cuentan para el VPP pero no para los errores.
-    quitar_giro
-        Descuenta el giro comun a todos los genes antes de medir pico, valle
-        y curva. Ver el encabezado del modulo.
-    """
-    n_atlas = int(len(ajuste))
-    salida: dict[str, float] = {k: float("nan") for k in _CLAVES}
-    salida["atlas_n_atlas"] = float(n_atlas)
-
-    if n_atlas == 0:
-        salida["atlas_vpp"] = float("nan")
-        salida["atlas_n_evaluados"] = 0.0
-        return salida
-
+def _ritmicos(ajuste: pd.DataFrame, verdad: pd.DataFrame) -> np.ndarray:
+    """Mascara de los genes del atlas que tienen onda verdadera que comparar."""
     nombres = ajuste["gene_name"].to_numpy()
     faltan = set(nombres) - set(verdad.index)
     if faltan:
@@ -125,18 +97,28 @@ def atlas_metrics(
             f"{len(faltan)} genes del atlas no estan en la verdad, p.ej. "
             f"{sorted(faltan)[:3]}"
         )
+    return verdad.loc[nombres, "kind"].to_numpy() != "fondo"
 
-    v = verdad.loc[nombres]
-    es_ritmico = v["kind"].to_numpy() != "fondo"
 
-    salida["atlas_vpp"] = float(es_ritmico.mean())
-    salida["atlas_n_evaluados"] = float(es_ritmico.sum())
+def per_gene_errors(
+    ajuste: pd.DataFrame,
+    verdad: pd.DataFrame,
+    quitar_giro: bool = False,
+) -> pd.DataFrame:
+    """
+    Una fila por gen evaluable, con su error frente a la onda verdadera.
 
-    if not es_ritmico.any():
-        return salida
+    Es la tabla de la que ``atlas_metrics`` saca sus resumenes, y la que
+    alimenta las figuras por gen del capitulo: sin ella habria que repetir
+    este calculo en el codigo de las figuras y las dos copias podrian
+    separarse en silencio.
 
-    a = ajuste.loc[es_ritmico]
-    v = v.loc[es_ritmico]
+    Los genes de fondo quedan fuera, porque no tienen onda con la que
+    comparar. Ver el encabezado del modulo para el resto de decisiones.
+    """
+    es_ritmico = _ritmicos(ajuste, verdad)
+    a = ajuste.loc[es_ritmico].reset_index(drop=True)
+    v = verdad.loc[a["gene_name"].to_numpy()]
 
     # --- pico y valle, con el giro global fuera si se pide ---------------
     pico_hat = np.array([FMMModel.peak_time(al, be, om) for al, be, om
@@ -169,6 +151,67 @@ def atlas_metrics(
     e_omega = a["omega"].to_numpy() - v["omega"].to_numpy()
     r2 = (a["r2_fmm"].to_numpy() if "r2_fmm" in a.columns
           else np.full(len(a), np.nan))
+
+    return pd.DataFrame({
+        "gene_name":   a["gene_name"].to_numpy(),
+        "kind":        v["kind"].to_numpy(),
+        "omega_true":  v["omega"].to_numpy(),
+        "omega_hat":   a["omega"].to_numpy(),
+        "alpha_true":  v["alpha"].to_numpy(),
+        "alpha_hat":   alpha_hat % TWO_PI,
+        "beta_true":   v["beta"].to_numpy(),
+        "beta_hat":    a["beta"].to_numpy(),
+        "pico_true_h": pico_ref * 24.0 / TWO_PI,
+        "pico_hat_h":  (pico_hat % TWO_PI) * 24.0 / TWO_PI,
+        "err_pico_h":  e_pico,
+        "err_valle_h": e_valle,
+        "err_omega":   e_omega,
+        "rmse_curva":  rmse,
+        "r2_fmm":      r2,
+        "giro_rad":    giro,
+    })
+
+
+def atlas_metrics(
+    ajuste: pd.DataFrame,
+    verdad: pd.DataFrame,
+    quitar_giro: bool = False,
+) -> dict[str, float]:
+    """
+    Compara las ondas del atlas con las verdaderas, gen a gen.
+
+    Parameters
+    ----------
+    ajuste
+        Lo que publica el atlas, una fila por gen seleccionado, con columnas
+        ``gene_name, M, amplitude, alpha, beta, omega``.
+    verdad
+        ``truth.gene_params`` indexado por gen, con ``kind, M, A, alpha,
+        beta, omega``. Los genes de fondo no tienen onda verdadera, asi que
+        cuentan para el VPP pero no para los errores.
+    quitar_giro
+        Descuenta el giro comun a todos los genes antes de medir pico, valle
+        y curva. Ver el encabezado del modulo.
+    """
+    n_atlas = int(len(ajuste))
+    salida: dict[str, float] = {k: float("nan") for k in _CLAVES}
+    salida["atlas_n_atlas"] = float(n_atlas)
+
+    if n_atlas == 0:
+        salida["atlas_vpp"] = float("nan")
+        salida["atlas_n_evaluados"] = 0.0
+        return salida
+
+    es_ritmico = _ritmicos(ajuste, verdad)
+    salida["atlas_vpp"] = float(es_ritmico.mean())
+    salida["atlas_n_evaluados"] = float(es_ritmico.sum())
+    if not es_ritmico.any():
+        return salida
+
+    g = per_gene_errors(ajuste, verdad, quitar_giro)
+    e_pico, e_valle = g["err_pico_h"].to_numpy(), g["err_valle_h"].to_numpy()
+    e_omega, rmse = g["err_omega"].to_numpy(), g["rmse_curva"].to_numpy()
+    r2, giro = g["r2_fmm"].to_numpy(), float(g["giro_rad"].iloc[0])
 
     salida.update({
         # mediana: el RMSE por gen ya es una media cuadratica, y un solo gen

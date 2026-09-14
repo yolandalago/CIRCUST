@@ -176,3 +176,52 @@ def test_se_registra_el_r2_que_el_atlas_declara_de_si_mismo():
     a["r2_fmm"] = [0.4, 0.8, 0.9]
     m = atlas_metrics(a, _verdad(genes, ["ritmico"] * 3))
     assert m["atlas_r2_mediana"] == pytest.approx(0.8)
+
+
+# ---------------------------------------------------------------------------
+# Tabla por gen, la que alimenta las figuras del capitulo
+# ---------------------------------------------------------------------------
+
+def test_per_gene_errors_da_una_fila_por_gen_evaluable():
+    from simulation.atlas import per_gene_errors
+
+    genes = ["RIT0001", "RIT0002", "CORE_A", "GEN0001"]
+    kinds = ["ritmico", "ritmico", "core", "fondo"]
+    g = per_gene_errors(_ajuste(genes), _verdad(genes, kinds))
+
+    assert len(g) == 3                     # el de fondo queda fuera
+    assert "GEN0001" not in set(g.gene_name)
+    assert {"omega_true", "omega_hat", "err_omega", "rmse_curva",
+            "pico_true_h", "pico_hat_h", "err_pico_h"} <= set(g.columns)
+
+
+def test_per_gene_errors_y_atlas_metrics_no_pueden_discrepar():
+    """
+    Los resumenes salen de esta tabla, asi que tienen que reproducirse desde
+    ella. Es lo que impide que las figuras por gen y las tablas del capitulo
+    cuenten cosas distintas.
+    """
+    from simulation.atlas import atlas_metrics, per_gene_errors
+
+    genes = [f"RIT{i:04d}" for i in range(5)]
+    a = _ajuste(genes)
+    a["omega"] = [0.5, 0.6, 0.7, 0.8, 0.9]
+    a["alpha"] = [1.0, 1.1, 0.9, 1.2, 0.8]
+    v = _verdad(genes, ["ritmico"] * 5)
+
+    g = per_gene_errors(a, v, quitar_giro=True)
+    m = atlas_metrics(a, v, quitar_giro=True)
+
+    assert m["atlas_omega_sesgo"] == pytest.approx(g.err_omega.mean())
+    assert m["atlas_rmse_curva"] == pytest.approx(g.rmse_curva.median())
+    assert m["atlas_err_pico_h"] == pytest.approx(g.err_pico_h.mean())
+    assert m["atlas_err_pico_sd_h"] == pytest.approx(g.err_pico_h.std(ddof=0))
+
+
+def test_el_pico_por_gen_sale_en_horas_del_ciclo():
+    from simulation.atlas import per_gene_errors
+
+    genes = ["RIT0001"]
+    g = per_gene_errors(_ajuste(genes), _verdad(genes, ["ritmico"]))
+    assert 0.0 <= g.pico_true_h.iloc[0] < 24.0
+    assert 0.0 <= g.pico_hat_h.iloc[0] < 24.0

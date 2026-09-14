@@ -2,7 +2,8 @@
 import pytest
 
 from simulation.grid import (
-    BLOQUES, METODOS_RESUMEN, SNR_NIVELES, build_grid, cell_seed,
+    BLOQUES, METODOS_RESUMEN, SIGMA_SIN_RUIDO, SNR_NIVELES, build_grid,
+    cell_seed,
 )
 
 
@@ -133,3 +134,30 @@ def test_bloque_sin_ruido_es_el_factorial_de_los_tres_factores():
 def test_bloque_desconocido_falla():
     with pytest.raises(ValueError, match="Bloque desconocido"):
         build_grid("inventado", reps=1)
+
+
+def test_sin_ruido_stab_esta_pareado_con_sin_ruido():
+    """
+    Mismo patron que principal contra regularizacion: los dos bloques generan
+    las matrices IDENTICAS y solo cambia ``fmm_method``. Sin esto la
+    comparacion seria entre celdas con ruido distinto y perderia toda la
+    potencia del diseno pareado.
+    """
+    a = build_grid("sin_ruido", reps=3)
+    b = build_grid("sin_ruido_stab", reps=3)
+    assert len(a) == len(b)
+    assert {c.fmm_method for c in a} == {"base"}
+    assert {c.fmm_method for c in b} == {"stabilized"}
+
+    def gen(celdas):
+        return sorted((c.cfg.n_samples, c.cfg.sampling, c.cfg.omega,
+                       c.cfg.sigma, c.cfg.seed, c.rep) for c in celdas)
+
+    assert gen(a) == gen(b), (
+        "las semillas de generacion no coinciden, la comparacion no seria pareada"
+    )
+
+
+def test_sin_ruido_stab_no_lleva_ruido():
+    for c in build_grid("sin_ruido_stab", reps=1):
+        assert c.cfg.sigma == SIGMA_SIN_RUIDO
