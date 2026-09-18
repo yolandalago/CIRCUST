@@ -313,11 +313,13 @@ def figura_b_victorias(par: pd.DataFrame, destino: Path) -> None:
     ]):
         t = (par[sel].assign(gana=lambda x: (x.d_atlas_rmse_curva < 0).astype(float))
              .pivot_table(index="n_samples", columns="snr", values="gana"))
-        im = _mapa(ax, t, tit, "RdBu_r", 0.5, fmt="{:.2f}", vlim=0.5)
+        # "RdBu" sin invertir: las fracciones altas, donde gana el
+        # estabilizado, salen en azul, con el mismo convenio que la figura A
+        im = _mapa(ax, t, tit, "RdBu", 0.5, fmt="{:.2f}", vlim=0.5)
     cb = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
     cb.set_label("fraccion de replicas\nen que gana el estabilizado", fontsize=8)
     fig.suptitle("Consistencia de la mejora, no solo su tamano\n"
-                 "0,5 = empate", fontsize=10, y=1.04)
+                 "azul = gana el estabilizado, 0,5 = empate", fontsize=10, y=1.04)
     fig.savefig(destino)
     plt.close(fig)
 

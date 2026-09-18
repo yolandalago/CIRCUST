@@ -162,7 +162,9 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
 
     v = (par.assign(gana=lambda x: (x.d_mae_h_oracle < 0).astype(float))
             .pivot_table(index="n_samples", columns="snr", values="gana"))
-    im = _mapa(axes[1], v, "Fraccion de replicas en que gana", "RdBu_r", 0.5,
+    # "RdBu" sin invertir: las fracciones altas, donde gana la agregacion,
+    # salen en azul, igual que las ganancias negativas del panel izquierdo
+    im = _mapa(axes[1], v, "Fraccion de replicas en que gana", "RdBu", 0.5,
                fmt="{:.2f}", vlim=0.5)
     fig.colorbar(im, ax=axes[1], fraction=0.045, pad=0.03)
 
