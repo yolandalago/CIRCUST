@@ -536,9 +536,14 @@ def _mpl():
     return plt
 
 
-def _figura_lineas(datos, x, y, hue, titulo, xlabel, ylabel, out: Path,
-                   logx: bool = True) -> None:
-    """Grafico de lineas con una serie por nivel de ``hue``."""
+def _figura_lineas(datos, x, y, hue, titulo, xlabel, ylabel, out: Path) -> None:
+    """
+    Grafico de lineas con una serie por nivel de ``hue``.
+
+    El eje x lleva marcas exactamente en los niveles del factor y con sus
+    valores tal cual (1, 1,5, 2, 4), sin escala logaritmica: con cuatro
+    niveles las potencias de 2 solo confunden.
+    """
     # Sin esto se escribian PNG vacios cuando el bloque todavia no se habia
     # ejecutado, y un fichero vacio parece una figura valida.
     if len(datos) == 0:
@@ -548,8 +553,8 @@ def _figura_lineas(datos, x, y, hue, titulo, xlabel, ylabel, out: Path,
     for nivel, sub in datos.groupby(hue):
         sub = sub.sort_values(x)
         ax.plot(sub[x], sub[y], marker="o", label=f"{hue} = {nivel}")
-    if logx:
-        ax.set_xscale("log", base=2)
+    niveles = sorted(datos[x].unique())
+    ax.set_xticks(niveles, [f"{v:g}" for v in niveles])
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(titulo)
