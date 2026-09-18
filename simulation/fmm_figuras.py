@@ -78,7 +78,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from simulation.truth import TWO_PI
 
 from simulation.analyze import (
-    CLAVE_REPLICA as CLAVE_PAREADA, METODO_REFERENCIA, _derivadas,
+    CLAVE_REPLICA as CLAVE_PAREADA, METODO_REFERENCIA, _derivadas, etiqueta,
 )
 
 # Celdas del volcado por gen. Son pocas y elegidas a proposito:
@@ -123,8 +123,8 @@ def cargar_pareado(entrada: Path | str,
     if par.empty:
         raise ValueError("el emparejamiento no cuadra, revisa las semillas")
 
-    par = par[(par["orientacion_ok_b"] == 1.0) & (par["orientacion_ok_s"] == 1.0)]
-    for m in ("atlas_rmse_curva", "atlas_err_pico_sd_h", "atlas_omega_sesgo",
+    par = par[(par["acierto_sentido_b"] == 1.0) & (par["acierto_sentido_s"] == 1.0)]
+    for m in ("atlas_error_onda", "atlas_variabilidad_pico_h", "atlas_sesgo_omega",
               "atlas_vpp", "atlas_err_subida_h"):
         par[f"d_{m}"] = par[f"{m}_s"] - par[f"{m}_b"]
     return par
@@ -171,7 +171,7 @@ def volcar_por_gen(destino: Path | str) -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def tabla_wilcoxon(par: pd.DataFrame,
-                   medida: str = "atlas_rmse_curva") -> pd.DataFrame:
+                   medida: str = "atlas_error_onda") -> pd.DataFrame:
     """
     Contraste pareado de Wilcoxon por celda, con correccion por multiplicidad.
 
@@ -277,7 +277,7 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
     plt = _mpl()
     fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.4))
     fig.subplots_adjust(top=0.72)
-    lim = np.nanmax(np.abs(par["d_atlas_rmse_curva"]
+    lim = np.nanmax(np.abs(par["d_atlas_error_onda"]
                            .groupby([par.omega, par.n_samples, par.snr])
                            .median()))
     for ax, (sel, tit) in zip(axes, [
@@ -285,10 +285,10 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
         (par.omega == 0.1, "Onda muy apuntada ($\\omega$ = 0,1)"),
     ]):
         t = par[sel].pivot_table(index="n_samples", columns="snr",
-                                 values="d_atlas_rmse_curva", aggfunc="median")
+                                 values="d_atlas_error_onda", aggfunc="median")
         im = _mapa(ax, t, tit, "RdBu_r", 0.0, vlim=lim)
     cb = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
-    cb.set_label("$\\Delta$ RMSE de la curva\n(estabilizado $-$ base)", fontsize=8)
+    cb.set_label("cambio en el error de la onda del atlas\n(estabilizado $-$ base)", fontsize=8)
     fig.suptitle("Efecto del FMM estabilizado sobre el ajuste por gen\n"
                  "azul = mejora, rojo = empeora", fontsize=10, y=1.04)
     fig.savefig(destino)
@@ -311,7 +311,7 @@ def figura_b_victorias(par: pd.DataFrame, destino: Path) -> None:
         (par.omega != 0.1, "Ondas normales ($\\omega$ = 0,5 y 0,9)"),
         (par.omega == 0.1, "Onda muy apuntada ($\\omega$ = 0,1)"),
     ]):
-        t = (par[sel].assign(gana=lambda x: (x.d_atlas_rmse_curva < 0).astype(float))
+        t = (par[sel].assign(gana=lambda x: (x.d_atlas_error_onda < 0).astype(float))
              .pivot_table(index="n_samples", columns="snr", values="gana"))
         # "RdBu" sin invertir: las fracciones altas, donde gana el
         # estabilizado, salen en azul, con el mismo convenio que la figura A
@@ -337,13 +337,13 @@ def figura_c_pico_horas(par: pd.DataFrame, destino: Path) -> None:
     o = par[par.omega != 0.1]
     fig, ax = plt.subplots(figsize=(5.4, 3.2))
     for n, marca in zip(sorted(o.n_samples.unique()), ["o", "s", "^"]):
-        g = o[o.n_samples == n].groupby("snr")["d_atlas_err_pico_sd_h"].median()
+        g = o[o.n_samples == n].groupby("snr")["d_atlas_variabilidad_pico_h"].median()
         ax.plot(g.index, g.values, marker=marca, label=f"n = {n}")
     ax.axhline(0, color="0.4", lw=0.8, ls="--")
     ax.set_xlabel("A/$\\sigma$")
-    ax.set_ylabel("$\\Delta$ dispersion del error de pico (h)")
+    ax.set_ylabel("cambio en la variabilidad del error\nen la hora del pico (h)")
     ax.set_title("Cuanto mejora la localizacion del pico, en horas\n"
-                 "negativo = el estabilizado acierta mas fino", fontsize=9)
+                 "negativo = el estabilizado situa el pico con menos error", fontsize=9)
     ax.legend(frameon=False, fontsize=8)
     fig.savefig(destino)
     plt.close(fig)
@@ -378,7 +378,7 @@ def figura_d_sesgo_omega(par: pd.DataFrame, destino: Path) -> None:
                              sharex=True, sharey="row")
     fig.subplots_adjust(top=0.84, hspace=0.28)
 
-    filas = (("atlas_omega_sesgo", "sesgo de $\\omega$\n(estimado $-$ verdadero)", True),
+    filas = (("atlas_sesgo_omega", "sesgo de $\\omega$\n(estimado $-$ verdadero)", True),
              ("atlas_omega_sd",    "desviacion tipica de $\\omega$\nentre genes", False))
     for r, (col, etiqueta, con_cero) in enumerate(filas):
         for c, w in enumerate(omegas):

@@ -24,12 +24,12 @@ def _fila(**kw):
         prop_rhythmic=0.20,
         robust_method="best_k", selection_criterion="r2_median",
         aggregation="auto", consensus_scale="circmean", status="ok",
-        medae_h=1.0, mae_h=1.2, rho_circ=0.9, rho_fl=0.9, tau=0.8, tau_circ=0.9,
-        orientacion_ok=1.0, p1=0.4, p2=0.7, p4=0.9, mae_h_oracle=0.5,
+        error_fase_h=1.0, error_fase_medio_h=1.2, rho_circ=0.9, rho_fl=0.9, tau=0.8, tau_circular=0.9,
+        acierto_sentido=1.0, p1=0.4, p2=0.7, p4=0.9, error_orden_h=0.5,
         r2_anchor=0.8, pares_ok=1.0, evidencia=1.7, desacuerdo_K=0.01,
         n_top=100, t_total_s=5.0, t_robust_s=2.0,
-        atlas_rmse_curva=0.3, atlas_err_pico_sd_h=1.0,
-        atlas_omega_sesgo=-0.2, atlas_vpp=0.95,
+        atlas_error_onda=0.3, atlas_variabilidad_pico_h=1.0,
+        atlas_sesgo_omega=-0.2, atlas_vpp=0.95,
     )
     base.update(kw)
     return base
@@ -42,7 +42,7 @@ def _falso(reps: int = 3) -> pd.DataFrame:
     Efectos plantados, para que los tests sepan que esperar:
     - el estabilizado tiene 0,1 menos de RMSE de curva, y la ventaja es el
       doble con snr 1 que con snr 3
-    - la agregacion (tsp3 y hods) tiene 0,1 h menos de oraculo que la
+    - la agregacion (tsp3 y hods) tiene 0,1 h menos de error del orden relativo que la
       referencia, medoid 0,05 h menos
     """
     filas = []
@@ -60,15 +60,15 @@ def _falso(reps: int = 3) -> pd.DataFrame:
                                 fmm_method=fmm, sampling=mu, omega=w, snr=snr,
                                 rep=rep, robust_method=rm, selection_criterion=sel,
                                 aggregation=agg, consensus_scale=esc,
-                                atlas_rmse_curva=0.4 - ventaja_fmm,
-                                mae_h_oracle=0.6 - ventaja_met,
-                                medae_h=1.5 - ventaja_met,
+                                atlas_error_onda=0.4 - ventaja_fmm,
+                                error_orden_h=0.6 - ventaja_met,
+                                error_fase_h=1.5 - ventaja_met,
                             ))
     for w in (0.1, 0.9):
         for rep in range(reps):
             filas.append(_fila(bloque="sin_ruido", omega=w, snr=1e6,
-                               tau_circ=0.2 if w == 0.1 else 1.0,
-                               orientacion_ok=0.0 if w == 0.1 else 1.0))
+                               tau_circular=0.2 if w == 0.1 else 1.0,
+                               acierto_sentido=0.0 if w == 0.1 else 1.0))
     return pd.DataFrame(filas)
 
 
@@ -80,7 +80,7 @@ def test_tabla_reconstruccion_usa_solo_la_referencia():
     assert len(t) == 2 * 2 * 2
     # 3 replicas por celda: solo base y best_k:r2_median entran
     assert (t[("n", "")] == 3).all()
-    assert {"medae_h", "abs_tau_circ", "orientacion_ok"} <= set(
+    assert {"error_fase_h", "concordancia", "acierto_sentido"} <= set(
         t.columns.get_level_values(0))
 
 
@@ -110,9 +110,9 @@ def test_la_orientacion_se_agrega_como_TASA_no_como_mediana():
     ref = (df.bloque == "rejilla") & (df.fmm_method == "base") \
         & (df.selection_criterion == "r2_median") & (df.robust_method == "best_k")
     idx = df[ref].groupby(["sampling", "omega", "snr"]).head(1).index
-    df.loc[idx, "orientacion_ok"] = 0.0
+    df.loc[idx, "acierto_sentido"] = 0.0
     t = tabla_reconstruccion(df)
-    assert np.allclose(t[("orientacion_ok", "tasa")].values, 2 / 3)
+    assert np.allclose(t[("acierto_sentido", "tasa")].values, 2 / 3)
 
 
 def test_las_filas_con_fallo_no_entran_en_las_medianas_pero_si_se_cuentan():
@@ -126,22 +126,22 @@ def test_las_filas_con_fallo_no_entran_en_las_medianas_pero_si_se_cuentan():
         if m in malas.columns:
             malas[m] = np.nan
     t = tabla_reconstruccion(pd.concat([df, malas], ignore_index=True))
-    assert not t[("medae_h", "mediana")].isna().any()
+    assert not t[("error_fase_h", "mediana")].isna().any()
     assert (t[("tasa_fallo", "")] > 0).any()
 
 
 def test_la_calidad_del_orden_se_resume_en_valor_absoluto():
     """
-    tau_circ cambia de signo cuando el ciclo se recorre al reves. Cuatro
+    tau_circular cambia de signo cuando el ciclo se recorre al reves. Cuatro
     replicas +0,8 +0,8 -0,8 -0,8 resumidas con signo dan 0,0, que se lee
     como "no se recupero nada" cuando la calidad real es 0,8 en las cuatro.
     """
-    filas = [_fila(rep=i, tau_circ=s * 0.8, orientacion_ok=float(s > 0))
+    filas = [_fila(rep=i, tau_circular=s * 0.8, acierto_sentido=float(s > 0))
              for i, s in enumerate([1, 1, -1, -1])]
     t = tabla_reconstruccion(pd.DataFrame(filas))
-    assert t[("abs_tau_circ", "mediana")].iloc[0] == pytest.approx(0.8)
-    assert t[("orientacion_ok", "tasa")].iloc[0] == pytest.approx(0.5)
-    assert ("tau_circ", "mediana") not in t.columns
+    assert t[("concordancia", "mediana")].iloc[0] == pytest.approx(0.8)
+    assert t[("acierto_sentido", "tasa")].iloc[0] == pytest.approx(0.5)
+    assert ("tau_circular", "mediana") not in t.columns
 
 
 def test_tabla_sin_ruido_separa_orden_de_orientacion():
@@ -149,9 +149,9 @@ def test_tabla_sin_ruido_separa_orden_de_orientacion():
     assert set(t["omega"]) == {0.1, 0.9}
     buena = t[t.omega == 0.9].iloc[0]
     mala  = t[t.omega == 0.1].iloc[0]
-    assert buena[("abs_tau_circ", "mediana")] == pytest.approx(1.0)
-    assert buena[("orientacion_ok", "tasa")] == pytest.approx(1.0)
-    assert mala[("orientacion_ok", "tasa")] == pytest.approx(0.0)
+    assert buena[("concordancia", "mediana")] == pytest.approx(1.0)
+    assert buena[("acierto_sentido", "tasa")] == pytest.approx(1.0)
+    assert mala[("acierto_sentido", "tasa")] == pytest.approx(0.0)
 
 
 # ── contraste FMM ──────────────────────────────────────────────────────────
@@ -161,13 +161,13 @@ def test_contraste_fmm_es_pareado_y_con_el_metodo_fijo():
     # 8 celdas x 3 replicas, un par por replica, solo la referencia
     assert len(par) == 8 * 3
     esperado = np.where(par["snr"] == 1.0, -0.2, -0.1)
-    assert np.allclose(par["delta_atlas_rmse_curva"], esperado)
+    assert np.allclose(par["delta_atlas_error_onda"], esperado)
 
 
 def test_contraste_fmm_descarta_las_replicas_con_orientacion_invertida():
     df = _falso()
     malas = (df.bloque == "rejilla") & (df.fmm_method == "stabilized") & (df.rep == 0)
-    df.loc[malas, "orientacion_ok"] = 0.0
+    df.loc[malas, "acierto_sentido"] = 0.0
     par = contraste_fmm(df)
     assert 0 not in set(par["rep"])
     assert len(par) == 8 * 2
@@ -182,7 +182,7 @@ def test_contraste_fmm_falla_si_las_replicas_no_casan():
 
 def test_efectos_principales_detectan_la_interaccion_plantada():
     par = contraste_fmm(_falso())
-    t = efectos_principales(par, "atlas_rmse_curva").reset_index()
+    t = efectos_principales(par, "atlas_error_onda").reset_index()
     snr = t[t.factor == "snr"].set_index("nivel")
     assert snr.loc["1.0", "mediana"] == pytest.approx(-0.2)
     assert snr.loc["3.0", "mediana"] == pytest.approx(-0.1)
@@ -192,16 +192,16 @@ def test_efectos_principales_detectan_la_interaccion_plantada():
 
 def test_interaccion_devuelve_el_mapa_de_dos_factores():
     par = contraste_fmm(_falso())
-    m = interaccion(par, "atlas_rmse_curva", "omega", "snr")
+    m = interaccion(par, "atlas_error_onda", "omega", "snr")
     assert m.shape == (2, 2)
     assert m.loc[0.1, 1.0] == pytest.approx(-0.2)
-    v = interaccion(par, "atlas_rmse_curva", "omega", "snr", "victorias")
+    v = interaccion(par, "atlas_error_onda", "omega", "snr", "victorias")
     assert (v.values == 1.0).all()
 
 
 def test_modelo_lineal_recupera_el_efecto_plantado():
     par = contraste_fmm(_falso())
-    t = modelo_lineal(par, "atlas_rmse_curva", factores=["snr", "omega", "sampling"])
+    t = modelo_lineal(par, "atlas_error_onda", factores=["snr", "omega", "sampling"])
     # pasar de snr 1 a snr 3 reduce la ventaja en 0,1
     assert t.loc["C(snr)[T.3.0]", "coef"] == pytest.approx(0.1)
     assert abs(t.loc["C(omega)[T.0.9]", "coef"]) < 1e-9
@@ -211,7 +211,7 @@ def test_modelo_lineal_recupera_el_efecto_plantado():
 def test_tabla_atlas_separa_los_dos_metodos_en_niveles():
     t = tabla_atlas(_falso())
     assert "fmm_method" in t.index.names
-    col = ("atlas_rmse_curva", "mediana")
+    col = ("atlas_error_onda", "mediana")
     base = t.xs("base", level="fmm_method")[col]
     stab = t.xs("stabilized", level="fmm_method")[col]
     assert (stab.values < base.values).all()
@@ -225,9 +225,9 @@ def test_contraste_metodos_es_pareado_contra_la_referencia():
                                   "aggregate:hods:circmean"}
     tsp = met[met.metodo == "aggregate:tsp3:circmean"]
     assert len(tsp) == 8 * 3
-    assert np.allclose(tsp["delta_mae_h_oracle"], -0.1)
+    assert np.allclose(tsp["delta_error_orden_h"], -0.1)
     med = met[met.metodo == "best_k:medoid"]
-    assert np.allclose(med["delta_mae_h_oracle"], -0.05)
+    assert np.allclose(med["delta_error_orden_h"], -0.05)
 
 
 def test_contraste_metodos_solo_usa_el_fmm_pedido():
@@ -238,7 +238,7 @@ def test_contraste_metodos_solo_usa_el_fmm_pedido():
 
 def test_efectos_principales_por_metodo():
     met = contraste_metodos(_falso())
-    t = efectos_principales(met, "mae_h_oracle", por=["metodo"]).reset_index()
+    t = efectos_principales(met, "error_orden_h", por=["metodo"]).reset_index()
     assert set(t["metodo"]) == set(met["metodo"])
     hods = t[(t.metodo == "aggregate:hods:circmean") & (t.factor == "snr")]
     assert np.allclose(hods["mediana"], -0.1)

@@ -41,10 +41,10 @@ def _verdad(genes, kinds, M=0.0, A=1.0, alpha=1.0, beta=2.0, omega=0.7):
 def test_ajuste_perfecto_da_error_cero():
     genes = ["RIT0001", "RIT0002", "CORE_A"]
     m = atlas_metrics(_ajuste(genes), _verdad(genes, ["ritmico"]*2 + ["core"]))
-    assert m["atlas_rmse_curva"] == pytest.approx(0.0, abs=1e-9)
+    assert m["atlas_error_onda"] == pytest.approx(0.0, abs=1e-9)
     assert m["atlas_err_pico_h"] == pytest.approx(0.0, abs=1e-9)
     assert m["atlas_err_valle_h"] == pytest.approx(0.0, abs=1e-9)
-    assert m["atlas_omega_sesgo"] == pytest.approx(0.0, abs=1e-9)
+    assert m["atlas_sesgo_omega"] == pytest.approx(0.0, abs=1e-9)
     assert m["atlas_vpp"] == pytest.approx(1.0)
 
 
@@ -55,9 +55,9 @@ def test_los_errores_van_con_signo():
     """
     genes = ["RIT0001"]
     m = atlas_metrics(_ajuste(genes, omega=0.5), _verdad(genes, ["ritmico"], omega=0.7))
-    assert m["atlas_omega_sesgo"] == pytest.approx(-0.2, abs=1e-9)
+    assert m["atlas_sesgo_omega"] == pytest.approx(-0.2, abs=1e-9)
     m = atlas_metrics(_ajuste(genes, omega=0.9), _verdad(genes, ["ritmico"], omega=0.7))
-    assert m["atlas_omega_sesgo"] == pytest.approx(+0.2, abs=1e-9)
+    assert m["atlas_sesgo_omega"] == pytest.approx(+0.2, abs=1e-9)
 
 
 def test_el_vpp_cuenta_los_genes_de_fondo_colados_en_el_atlas():
@@ -80,7 +80,7 @@ def test_los_genes_de_fondo_no_entran_en_los_errores():
     a = atlas_metrics(_ajuste(solo_rit), _verdad(solo_rit, ["ritmico"]*2))
     b = atlas_metrics(_ajuste(con_fondo),
                       _verdad(con_fondo, ["ritmico"]*2 + ["fondo"]))
-    assert a["atlas_rmse_curva"] == pytest.approx(b["atlas_rmse_curva"])
+    assert a["atlas_error_onda"] == pytest.approx(b["atlas_error_onda"])
     assert a["atlas_vpp"] == 1.0 and b["atlas_vpp"] == pytest.approx(2/3)
 
 
@@ -96,8 +96,8 @@ def test_el_rmse_de_la_curva_no_depende_de_la_parametrizacion():
     a = _ajuste(genes, alpha=1.0)
     b = _ajuste(genes, alpha=1.0 + TWO_PI)
     v = _verdad(genes, ["ritmico"], alpha=1.0)
-    assert atlas_metrics(a, v)["atlas_rmse_curva"] == pytest.approx(
-        atlas_metrics(b, v)["atlas_rmse_curva"], abs=1e-9)
+    assert atlas_metrics(a, v)["atlas_error_onda"] == pytest.approx(
+        atlas_metrics(b, v)["atlas_error_onda"], abs=1e-9)
 
 
 def test_un_error_de_pico_se_mide_en_horas():
@@ -114,7 +114,7 @@ def test_un_error_de_pico_se_mide_en_horas():
 def test_quitar_giro_descuenta_el_desplazamiento_comun_y_lo_registra():
     """
     Si la escala estimada esta girada, todos los picos se desplazan lo mismo.
-    Ese es un error de anclaje, ya medido por mae_h sobre las muestras, y
+    Ese es un error de anclaje, ya medido por error_fase_medio_h sobre las muestras, y
     dejarlo dentro taparia la calidad del ajuste que es lo que aqui se mide.
     """
     genes = [f"RIT{i:04d}" for i in range(8)]
@@ -128,7 +128,7 @@ def test_quitar_giro_descuenta_el_desplazamiento_comun_y_lo_registra():
 
     limpio = atlas_metrics(a, v, quitar_giro=True)
     assert limpio["atlas_err_pico_h"] == pytest.approx(0.0, abs=1e-9)
-    assert limpio["atlas_rmse_curva"] == pytest.approx(0.0, abs=1e-9)
+    assert limpio["atlas_error_onda"] == pytest.approx(0.0, abs=1e-9)
     assert abs(limpio["atlas_giro_h"]) == pytest.approx(3.0, abs=1e-6)
 
 
@@ -142,14 +142,14 @@ def test_quitar_giro_no_borra_el_error_que_difiere_entre_genes():
 
     m = atlas_metrics(a, v, quitar_giro=True)
     assert m["atlas_err_pico_h"] == pytest.approx(0.0, abs=1e-6)  # se compensan
-    assert m["atlas_err_pico_sd_h"] == pytest.approx(2.0, abs=1e-6)
-    assert m["atlas_rmse_curva"] > 0.0
+    assert m["atlas_variabilidad_pico_h"] == pytest.approx(2.0, abs=1e-6)
+    assert m["atlas_error_onda"] > 0.0
 
 
 def test_sin_genes_evaluables_devuelve_nan_y_no_revienta():
     genes = ["GEN0001", "GEN0002"]
     m = atlas_metrics(_ajuste(genes), _verdad(genes, ["fondo"]*2))
-    assert np.isnan(m["atlas_rmse_curva"])
+    assert np.isnan(m["atlas_error_onda"])
     assert m["atlas_vpp"] == pytest.approx(0.0)
     assert m["atlas_n_evaluados"] == 0
 
@@ -165,7 +165,7 @@ def test_la_amplitud_no_se_compara_porque_el_min_max_la_borra():
     genes = ["RIT0001"]
     v = _verdad(genes, ["ritmico"], M=3.0, A=4.0)
     m = atlas_metrics(_ajuste(genes, M=0.0, A=1.0), v)
-    assert m["atlas_rmse_curva"] == pytest.approx(0.0, abs=1e-9)
+    assert m["atlas_error_onda"] == pytest.approx(0.0, abs=1e-9)
     assert "atlas_err_A" not in m
 
 
@@ -212,10 +212,10 @@ def test_per_gene_errors_y_atlas_metrics_no_pueden_discrepar():
     g = per_gene_errors(a, v, quitar_giro=True)
     m = atlas_metrics(a, v, quitar_giro=True)
 
-    assert m["atlas_omega_sesgo"] == pytest.approx(g.err_omega.mean())
-    assert m["atlas_rmse_curva"] == pytest.approx(g.rmse_curva.median())
+    assert m["atlas_sesgo_omega"] == pytest.approx(g.err_omega.mean())
+    assert m["atlas_error_onda"] == pytest.approx(g.rmse_curva.median())
     assert m["atlas_err_pico_h"] == pytest.approx(g.err_pico_h.mean())
-    assert m["atlas_err_pico_sd_h"] == pytest.approx(g.err_pico_h.std(ddof=0))
+    assert m["atlas_variabilidad_pico_h"] == pytest.approx(g.err_pico_h.std(ddof=0))
 
 
 def test_el_pico_por_gen_sale_en_horas_del_ciclo():

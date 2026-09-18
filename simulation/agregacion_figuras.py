@@ -11,31 +11,35 @@ Lo que dice la rejilla, medido sobre 16.200 pares por variante del FMM
 1. **HODs y TSP3 producen exactamente el mismo orden** en el 100 % de los
    pares. No es un empate estadistico, es identidad: con K = 5 repeticiones
    que discrepan poco, los dos llegan al mismo ciclo. Difieren solo en coste,
-   y ahi HODs gana con claridad (ver figura C). En el capitulo se habla de
-   "la agregacion" sin distinguirlos, y se recomienda HODs.
+   y ahi HODs gana con claridad (figura D). En el capitulo se habla de "la
+   agregacion" sin distinguirlos, y se recomienda HODs.
 
 2. **best_k con medoid no aporta nada.** Elige la misma repeticion que
    ``r2_median`` en el 22 % de los casos, y cuando elige otra la mediana del
-   delta es 0,000. Cambiar de criterio de seleccion no es una via de mejora.
+   cambio es 0,000. Cambiar de criterio de seleccion no es una via de mejora.
 
 3. **La agregacion gana de forma consistente pero pequena.** Sobre el error
-   del oraculo, que mide el orden al margen del anclaje, gana en el 69 % de
-   las replicas con el FMM base y en el 71 % con el estabilizado. La mediana
-   de la ganancia es de 0,03 h, y llega a 0,14 h con n = 96 y A/sigma = 1.
-   Sobre ``medae_h``, que incluye el anclaje, la victoria baja al 55 %: el
-   error de sincronizacion es comun a los dos brazos y tapa la diferencia.
+   del orden relativo, que mide el orden al margen del anclaje, gana en el
+   69 % de las replicas con el FMM base y en el 71 % con el estabilizado. La
+   mediana de la ganancia es de 0,03 h, y llega a 0,14 h con n = 96 y
+   A/sigma = 1. Sobre el error de fase absoluta, que incluye el anclaje, la
+   victoria baja al 55 %: el error de sincronizacion es comun a los dos
+   brazos y tapa la diferencia.
 
 4. **La ganancia crece con n y al bajar la senal.** Es lo contrario del
    FMM estabilizado, cuya ventaja se apaga al subir n. El consenso promedia
    el ruido de particion de las K repeticiones, y ese ruido pesa mas cuando
    hay muchas muestras que ordenar y poca senal para hacerlo.
 
-5. **No depende del desacuerdo entre las K tanto como se esperaba.** La
-   hipotesis era que solo puede haber ganancia donde las K discrepan. La
-   ganancia existe ya en el tramo de menor desacuerdo (73 % de victorias) y
-   crece hasta la mitad de la escala, donde se estabiliza. La agregacion
-   aprovecha discrepancias pequenas, del orden de 0,005 en la escala 0 a 1
-   de ``desacuerdo_K``.
+Las figuras
+-----------
+A. Mapa de ganancia por n y A/sigma, con la fraccion de victorias al lado.
+B. Dispersion pareada: cada punto es una replica, en x el error de quedarse
+   con una repeticion y en y el de agregar. Bajo la diagonal gana agregar.
+   Es la figura que explica que significa "pareado".
+C. Ganancia por nivel de cada factor de la rejilla. Responde a "en que
+   hiperparametros mejora".
+D. Coste de la Etapa 4 por metodo y n.
 
 Uso
 ---
@@ -55,13 +59,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from simulation.analyze import (
-    FMM_REFERENCIA, METODO_REFERENCIA, _rejilla, contraste_metodos, load,
+    FACTORES, FMM_REFERENCIA, METODO_REFERENCIA, _rejilla, contraste_metodos,
+    etiqueta, load,
 )
 from simulation.fmm_figuras import _mapa, _mpl, tabla_wilcoxon
 
 METODO_AGREGACION = "aggregate:hods:circmean"
+MEDIDA = "error_orden_h"
 
-# Etiquetas cortas para las figuras y las tablas del capitulo.
+# Etiquetas cortas de los metodos para las figuras y las tablas del capitulo.
 NOMBRES = {
     "best_k:r2_median":        "best_k (R2 mediana)",
     "best_k:medoid":           "best_k (medoide)",
@@ -69,6 +75,8 @@ NOMBRES = {
     "aggregate:hods:circmean": "HODs",
     "aggregate:tsp3:cire":     "TSP3 + CIRE",
 }
+
+AZUL, ROJO = "#2471a3", "#c0392b"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -89,12 +97,12 @@ def cargar_contraste(entrada: Path | str, fmm: str = FMM_REFERENCIA,
     par = met[met["metodo"] == metodo].copy()
     if par.empty:
         raise ValueError(f"no hay pares del metodo {metodo!r}")
-    for m in ("mae_h_oracle", "abs_tau_circ", "medae_h"):
+    for m in ("error_orden_h", "concordancia", "error_fase_h"):
         par[f"d_{m}"] = par[f"delta_{m}"]
     return par.reset_index(drop=True)
 
 
-def tabla_identidades(df: pd.DataFrame, medida: str = "mae_h_oracle") -> pd.DataFrame:
+def tabla_identidades(df: pd.DataFrame, medida: str = MEDIDA) -> pd.DataFrame:
     """
     Fraccion de pares en que dos metodos dan EXACTAMENTE el mismo resultado.
 
@@ -118,23 +126,23 @@ def tabla_identidades(df: pd.DataFrame, medida: str = "mae_h_oracle") -> pd.Data
     return pd.DataFrame(filas)
 
 
-def tabla_por_desacuerdo(par: pd.DataFrame, n_tramos: int = 6) -> pd.DataFrame:
+def tabla_por_factor(par: pd.DataFrame, medida: str = MEDIDA) -> pd.DataFrame:
     """
-    Ganancia de la agregacion por tramo de desacuerdo entre las K.
-
-    ``desacuerdo_K`` es observable sin la verdad, asi que esta tabla dice
-    tambien cuando merece la pena agregar en un tejido real.
+    Ganancia de la agregacion por nivel de cada factor: mediana, rango
+    intercuartilico y fraccion de victorias. Una fila por factor y nivel.
     """
-    p = par.copy()
-    p["tramo"] = pd.qcut(p["desacuerdo_K_ref"], n_tramos, duplicates="drop")
-    g = p.groupby("tramo", observed=True)
-    return pd.DataFrame({
-        "n":                  g.size(),
-        "desacuerdo_mediana": g["desacuerdo_K_ref"].median(),
-        "oracle_referencia":  g["mae_h_oracle_ref"].median(),
-        "delta_mediana":      g["d_mae_h_oracle"].median(),
-        "tasa_victorias":     g["d_mae_h_oracle"].apply(lambda x: float((x < 0).mean())),
-    })
+    col = f"d_{medida}"
+    filas = []
+    for f in FACTORES:
+        for nivel, g in par.groupby(f):
+            d = g[col].dropna()
+            filas.append(dict(
+                factor=f, nivel=str(nivel), n=int(d.size),
+                ganancia_mediana=float(d.median()),
+                iqr=float(d.quantile(0.75) - d.quantile(0.25)),
+                tasa_victorias=float((d < 0).mean()),
+            ))
+    return pd.DataFrame(filas).set_index(["factor", "nivel"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -143,74 +151,125 @@ def tabla_por_desacuerdo(par: pd.DataFrame, n_tramos: int = 6) -> pd.DataFrame:
 
 def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
     """
-    A: efecto pareado y consistencia, por n y A/sigma.
+    A: ganancia y consistencia por n y A/sigma.
 
-    Izquierda la mediana de la ganancia en horas del oraculo, derecha la
-    fraccion de replicas en que gana la agregacion. Se leen juntas: la
+    Izquierda, cuanto baja el error del orden relativo al agregar (mediana en
+    horas). Derecha, en que fraccion de replicas mejora. Se leen juntas: la
     ganancia es pequena en horas pero se repite en dos de cada tres replicas,
     y las dos crecen hacia abajo (mas muestras) y hacia la izquierda (menos
     senal).
     """
     plt = _mpl()
-    fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.4))
+    fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.4))
     fig.subplots_adjust(top=0.72, wspace=0.35)
 
     t = par.pivot_table(index="n_samples", columns="snr",
-                        values="d_mae_h_oracle", aggfunc="median")
-    im = _mapa(axes[0], t, "Ganancia mediana (h del oraculo)", "RdBu_r", 0.0)
+                        values=f"d_{MEDIDA}", aggfunc="median")
+    im = _mapa(axes[0], t, "Cuanto baja el error del orden relativo (h)",
+               "RdBu_r", 0.0)
     fig.colorbar(im, ax=axes[0], fraction=0.045, pad=0.03)
 
-    v = (par.assign(gana=lambda x: (x.d_mae_h_oracle < 0).astype(float))
+    v = (par.assign(gana=lambda x: (x[f"d_{MEDIDA}"] < 0).astype(float))
             .pivot_table(index="n_samples", columns="snr", values="gana"))
     # "RdBu" sin invertir: las fracciones altas, donde gana la agregacion,
     # salen en azul, igual que las ganancias negativas del panel izquierdo
-    im = _mapa(axes[1], v, "Fraccion de replicas en que gana", "RdBu", 0.5,
-               fmt="{:.2f}", vlim=0.5)
+    im = _mapa(axes[1], v, "En que fraccion de replicas mejora",
+               "RdBu", 0.5, fmt="{:.2f}", vlim=0.5)
     fig.colorbar(im, ax=axes[1], fraction=0.045, pad=0.03)
 
-    fig.suptitle("Agregacion (HODs) frente a quedarse con una repeticion\n"
+    fig.suptitle("Agregar las K repeticiones (HODs) frente a quedarse con una\n"
                  "azul = gana la agregacion", fontsize=10, y=1.04)
     fig.savefig(destino)
     plt.close(fig)
 
 
-def figura_b_desacuerdo(par: pd.DataFrame, destino: Path) -> None:
+def figura_b_pareada(par: pd.DataFrame, destino: Path) -> None:
     """
-    B: la ganancia frente al desacuerdo entre las K repeticiones.
+    B: dispersion pareada, un panel por n.
 
-    Es la figura del mecanismo. La agregacion solo puede cambiar el orden
-    donde las K discrepan, y ``desacuerdo_K`` mide cuanto discrepan. La
-    ganancia aparece ya con desacuerdos minusculos y se estabiliza a mitad
-    de escala: no hace falta que las K se contradigan mucho para que el
-    consenso mejore a la mejor de ellas.
+    Cada punto es una replica. En x el error del orden relativo al quedarse
+    con una repeticion, en y el error al agregar. Los puntos bajo la
+    diagonal son replicas donde agregar mejora. El color es A/sigma, que es
+    lo que mueve los puntos a lo largo de la diagonal: con poca senal el
+    error es grande en los dos brazos, y ahi es donde mas se separan.
     """
     plt = _mpl()
-    t = tabla_por_desacuerdo(par, n_tramos=8)
-    x = t["desacuerdo_mediana"].to_numpy()
+    niveles_n = sorted(par["n_samples"].unique())
+    niveles_snr = sorted(par["snr"].unique())
+    colores = plt.cm.viridis(np.linspace(0.1, 0.9, len(niveles_snr)))
 
-    fig, ax1 = plt.subplots(figsize=(5.6, 3.3))
-    ax1.plot(x, t["delta_mediana"], marker="o", color="#2471a3",
-             label="ganancia mediana (h)")
-    ax1.axhline(0, color="0.4", lw=0.8, ls="--")
-    ax1.set_xlabel("desacuerdo entre las K repeticiones (mediana del tramo)")
-    ax1.set_ylabel("ganancia en el oraculo (h)\nnegativo = gana la agregacion",
-                   color="#2471a3")
-    ax1.set_xscale("log")
+    fig, axes = plt.subplots(1, len(niveles_n), figsize=(3.1 * len(niveles_n), 3.6),
+                             sharex=True, sharey=True)
+    fig.subplots_adjust(top=0.80, bottom=0.18, wspace=0.08)
+    axes = np.atleast_1d(axes)
+    lim = float(np.nanpercentile(
+        np.concatenate([par[f"{MEDIDA}_ref"], par[f"{MEDIDA}_met"]]), 99.5))
+    for ax, n in zip(axes, niveles_n):
+        sub = par[par["n_samples"] == n]
+        for snr, color in zip(niveles_snr, colores):
+            s = sub[sub["snr"] == snr]
+            ax.scatter(s[f"{MEDIDA}_ref"], s[f"{MEDIDA}_met"], s=5, alpha=0.35,
+                       color=color, label=f"A/$\\sigma$ = {snr:g}", rasterized=True)
+        ax.plot([0, lim], [0, lim], color="0.3", lw=0.9, ls="--")
+        gana = float((sub[f"d_{MEDIDA}"] < 0).mean())
+        ax.text(0.04, 0.95, f"n = {n}\nmejora en el {100 * gana:.0f} %",
+                transform=ax.transAxes, va="top", fontsize=8.5)
+        ax.set_xlim(0, lim)
+        ax.set_ylim(0, lim)
+        ax.set_aspect("equal")
+    fig.supxlabel("error al quedarse con una repeticion (h)", fontsize=9, y=0.02)
+    axes[0].set_ylabel("error al agregar (h)")
+    leg = axes[-1].legend(frameon=False, fontsize=7.5, loc="lower right",
+                          markerscale=2.5)
+    for h in leg.legend_handles:
+        h.set_alpha(1.0)
+    fig.suptitle("Error del orden relativo, replica a replica\n"
+                 "bajo la diagonal gana la agregacion", fontsize=10, y=1.0)
+    fig.savefig(destino, dpi=200)
+    plt.close(fig)
 
-    ax2 = ax1.twinx()
-    ax2.plot(x, t["tasa_victorias"], marker="s", color="#c0392b",
-             label="fraccion de victorias")
-    ax2.set_ylim(0.4, 1.0)
-    ax2.set_ylabel("fraccion de replicas en que gana", color="#c0392b")
 
-    ax1.set_title("La ganancia aparece con desacuerdos pequenos", fontsize=9)
+def figura_c_factores(par: pd.DataFrame, destino: Path) -> None:
+    """
+    C: ganancia por nivel de cada factor de la rejilla.
+
+    Un panel por factor, la mediana de la ganancia con su rango
+    intercuartilico. Lo que se ve: n y A/sigma mueven la ganancia, los demas
+    factores apenas.
+    """
+    plt = _mpl()
+    t = tabla_por_factor(par).reset_index()
+    fig, axes = plt.subplots(1, len(FACTORES), figsize=(2.2 * len(FACTORES), 3.3),
+                             sharey=True)
+    fig.subplots_adjust(top=0.74, wspace=0.12)
+    tope  = (t["ganancia_mediana"] + t["iqr"] / 2.0).max()
+    suelo = (t["ganancia_mediana"] - t["iqr"] / 2.0).min()
+    for ax, f in zip(axes, FACTORES):
+        sub = t[t.factor == f]
+        x = np.arange(len(sub))
+        ax.errorbar(x, sub["ganancia_mediana"], yerr=sub["iqr"] / 2.0,
+                    fmt="o", ms=4, capsize=2, color=AZUL)
+        # los porcentajes van arriba del todo, fuera del recorrido de las
+        # barras, para no pisarlas
+        for xi, tv in zip(x, sub["tasa_victorias"]):
+            ax.text(xi, 0.97, f"{100 * tv:.0f} %", ha="center", va="top",
+                    fontsize=7.5, color=ROJO, transform=ax.get_xaxis_transform())
+        ax.axhline(0, color="0.4", lw=0.8, ls="--")
+        ax.set_xticks(x, sub["nivel"], rotation=45, fontsize=8)
+        ax.set_title(etiqueta(f), fontsize=8.5)
+        ax.set_xlim(-0.6, len(sub) - 0.4)
+        ax.set_ylim(suelo - 0.02, tope + 0.06)
+    axes[0].set_ylabel("cuanto baja el error del orden relativo (h)\n"
+                       "mediana y rango intercuartilico", fontsize=8)
+    fig.suptitle("Ganancia de la agregacion por factor\n"
+                 "en rojo, la fraccion de replicas en que mejora", fontsize=10, y=1.02)
     fig.savefig(destino)
     plt.close(fig)
 
 
-def figura_c_coste(df: pd.DataFrame, destino: Path) -> None:
+def figura_d_coste(df: pd.DataFrame, destino: Path) -> None:
     """
-    C: coste de la Etapa 4 por metodo y numero de muestras.
+    D: coste de la Etapa 4 por metodo y numero de muestras.
 
     HODs cuesta casi lo mismo que quedarse con una repeticion. TSP3 escala
     mal con n porque el problema del viajante crece con el numero de
@@ -232,7 +291,7 @@ def figura_c_coste(df: pd.DataFrame, destino: Path) -> None:
         if metodo in t.columns:
             ax.plot(t.index, t[metodo], marker=marca, label=NOMBRES[metodo])
     ax.set_xticks(list(t.index), [f"{v:g}" for v in t.index])
-    ax.set_xlabel("n muestras")
+    ax.set_xlabel(etiqueta("n_samples"))
     ax.set_ylabel("tiempo de la Etapa 4 (s, mediana)")
     ax.set_title("Coste de resumir las K repeticiones", fontsize=9)
     ax.legend(frameon=False, fontsize=7.5)
@@ -264,18 +323,19 @@ def main() -> None:
     for fmm in ("base", "stabilized"):
         par = cargar_contraste(entrada, fmm=fmm)
         print(f"  {len(par)} pares HODs contra {METODO_REFERENCIA} con FMM {fmm}")
-        t = tabla_wilcoxon(par, medida="mae_h_oracle")
+        t = tabla_wilcoxon(par, medida=MEDIDA)
         t.to_csv(tablas / f"agregacion_wilcoxon_{fmm}.csv", index=False)
         print(f"  escrita agregacion_wilcoxon_{fmm}.csv ({len(t)} celdas)")
-        tabla_por_desacuerdo(par).to_csv(tablas / f"agregacion_desacuerdo_{fmm}.csv")
-        print(f"  escrita agregacion_desacuerdo_{fmm}.csv")
+        tabla_por_factor(par).to_csv(tablas / f"agregacion_por_factor_{fmm}.csv")
+        print(f"  escrita agregacion_por_factor_{fmm}.csv")
         if fmm == "base":
             figura_a_efecto(par, imagenes / "agr-a-efecto.png")
-            figura_b_desacuerdo(par, imagenes / "agr-b-desacuerdo.png")
-            print("  escritas agr-a-efecto.png y agr-b-desacuerdo.png")
+            figura_b_pareada(par, imagenes / "agr-b-pareada.png")
+            figura_c_factores(par, imagenes / "agr-c-factores.png")
+            print("  escritas agr-a-efecto.png, agr-b-pareada.png y agr-c-factores.png")
 
-    figura_c_coste(df, imagenes / "agr-c-coste.png")
-    print("  escrita agr-c-coste.png")
+    figura_d_coste(df, imagenes / "agr-d-coste.png")
+    print("  escrita agr-d-coste.png")
 
 
 if __name__ == "__main__":

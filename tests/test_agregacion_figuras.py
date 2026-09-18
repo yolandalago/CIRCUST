@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from simulation.agregacion_figuras import (
-    cargar_contraste, tabla_identidades, tabla_por_desacuerdo,
+    cargar_contraste, tabla_identidades, tabla_por_factor,
 )
 
 METODOS = (
@@ -23,26 +23,26 @@ def _falso(reps: int = 8) -> pd.DataFrame:
     """
     Rejilla falsa donde HODs y TSP3 son identicos, medoid coincide con la
     referencia en la mitad de las replicas, y la agregacion mejora 0,05 h
-    con desacuerdo alto y nada con desacuerdo bajo.
+    con A/sigma 1 y nada con A/sigma 4.
     """
     filas = []
     for snr in (1.0, 4.0):
         for rep in range(reps):
-            desacuerdo = 0.02 if rep % 2 == 0 else 0.001
             for rm, sel, agg, esc in METODOS:
-                oracle = 1.0
-                if agg in ("tsp3", "hods") and desacuerdo > 0.01:
-                    oracle -= 0.05
+                error = 1.0
+                if agg in ("tsp3", "hods") and snr == 1.0:
+                    error -= 0.05
                 if sel == "medoid" and rep % 2 == 1:
-                    oracle += 0.01          # elige otra repeticion
+                    error += 0.01          # elige otra repeticion
                 filas.append(dict(
                     bloque="rejilla", fmm_method="base", sampling="uniforme",
                     omega=0.5, snr=snr, n_samples=48, rep=rep, n_core=20,
                     n_genes=1000, prop_rhythmic=0.2, status="ok",
                     robust_method=rm, selection_criterion=sel,
                     aggregation=agg, consensus_scale=esc,
-                    mae_h_oracle=oracle, tau_circ=0.9, medae_h=oracle + 0.5,
-                    orientacion_ok=1.0, desacuerdo_K=desacuerdo, t_robust_s=1.0,
+                    error_orden_h=error, tau_circular=0.9,
+                    error_fase_h=error + 0.5, acierto_sentido=1.0,
+                    t_robust_s=1.0,
                 ))
     return pd.DataFrame(filas)
 
@@ -64,20 +64,21 @@ def test_identidades_distinguen_iguales_de_empates():
 def test_el_contraste_es_pareado_y_negativo_cuando_gana(tmp_path):
     par = cargar_contraste(_csv(tmp_path, _falso()))
     assert len(par) == 2 * 8
-    ganan = par[par.desacuerdo_K_ref > 0.01]
-    empatan = par[par.desacuerdo_K_ref <= 0.01]
-    assert np.allclose(ganan["d_mae_h_oracle"], -0.05)
-    assert np.allclose(empatan["d_mae_h_oracle"], 0.0)
+    ganan = par[par.snr == 1.0]
+    empatan = par[par.snr == 4.0]
+    assert np.allclose(ganan["d_error_orden_h"], -0.05)
+    assert np.allclose(empatan["d_error_orden_h"], 0.0)
 
 
-def test_tabla_por_desacuerdo_separa_los_tramos(tmp_path):
+def test_tabla_por_factor_recupera_el_efecto_por_nivel(tmp_path):
     par = cargar_contraste(_csv(tmp_path, _falso()))
-    t = tabla_por_desacuerdo(par, n_tramos=2)
-    assert len(t) == 2
-    bajo, alto = t.iloc[0], t.iloc[1]
-    assert bajo["delta_mediana"] == pytest.approx(0.0)
-    assert alto["delta_mediana"] == pytest.approx(-0.05)
-    assert alto["tasa_victorias"] == pytest.approx(1.0)
+    t = tabla_por_factor(par)
+    assert t.loc[("snr", "1.0"), "ganancia_mediana"] == pytest.approx(-0.05)
+    assert t.loc[("snr", "1.0"), "tasa_victorias"] == pytest.approx(1.0)
+    assert t.loc[("snr", "4.0"), "ganancia_mediana"] == pytest.approx(0.0)
+    assert t.loc[("snr", "4.0"), "tasa_victorias"] == pytest.approx(0.0)
+    # los factores sin variacion en el falso salen con un solo nivel
+    assert len(t.loc["n_samples"]) == 1
 
 
 def test_falla_si_no_hay_pares_del_metodo(tmp_path):

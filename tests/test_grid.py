@@ -124,6 +124,21 @@ def test_invariancia_empareja_snr_con_escalas_distintas():
         assert len(sigmas) == 2      # dos escalas absolutas por cada SNR
 
 
+def test_invariancia_comparte_la_semilla_dentro_de_cada_par():
+    """
+    Los dos miembros de un par tienen que generar la MISMA matriz salvo
+    escala. Eso exige la misma semilla. Con semillas distintas la prueba
+    compara dos matrices aleatorias y no prueba nada.
+    """
+    celdas = build_grid("invariancia", reps=3)
+    por_par: dict[tuple, set[int]] = {}
+    for c in celdas:
+        por_par.setdefault((round(c.cfg.snr, 6), c.rep), set()).add(c.cfg.seed)
+    assert len(por_par) == 9
+    for semillas in por_par.values():
+        assert len(semillas) == 1
+
+
 def test_computacional_barre_el_tamano_y_usa_el_marco_estandar():
     celdas = build_grid("computacional", reps=1)
     assert {c.cfg.n_genes for c in celdas} == {1000, 5000, 20000}
@@ -151,7 +166,7 @@ def test_todas_las_celdas_son_generables():
 
 def test_el_eje_de_senal_ruido_arranca_donde_hay_senal():
     """
-    Por debajo de A/sigma = 1 el orden no se reconstruye (oraculo 3,3 a 3,9 h)
+    Por debajo de A/sigma = 1 el orden no se reconstruye (error del orden relativo 3,3 a 3,9 h)
     y gastar celdas ahi solo produce tasa de fallo. El 1,0 se conserva como
     celda de frontera. El 3 se quito tras medir que 3 y 4 son indistinguibles.
     """

@@ -5,7 +5,7 @@ Todas trabajan con angulos en ``[0, 2*pi)`` y devuelven los errores en horas,
 que es lo interpretable. La comparacion no necesita alineamiento previo: el
 gen ancla tiene su pico en ``pi`` por construccion y el sincronizador coloca
 el pico estimado en ``pi``, asi que las dos escalas viven en el mismo marco.
-Las dos medidas ``mae_h_oracle`` y ``tau_circ`` existen solo como
+Las dos medidas ``error_orden_h`` y ``tau_circular`` existen solo como
 diagnostico: dicen si el fallo fue del orden o solo del anclaje.
 """
 from __future__ import annotations
@@ -191,12 +191,12 @@ def tau_circular(theta_true, theta_hat) -> float:
     return suma / total
 
 
-def oracle_mae_h(theta_true, theta_hat, n_grid: int = 720) -> float:
+def error_orden_h(theta_true, theta_hat, n_grid: int = 720) -> float:
     """
     MAE en horas bajo la mejor rotacion y orientacion posibles.
 
     No es una medida de calidad del metodo, es un diagnostico: la diferencia
-    con ``mae_h`` es el error atribuible a la sincronizacion y no a la
+    con ``error_fase_medio_h`` es el error atribuible a la sincronizacion y no a la
     reconstruccion del orden.
     """
     tt = np.asarray(theta_true, dtype=float)
@@ -224,21 +224,21 @@ def evaluate(theta_true, theta_hat) -> dict[str, float]:
     dh = to_hours(circular_distance(tt, th))
     salida = {
         # en el marco tal cual, es lo que se reporta
-        "mae_h":    float(dh.mean()),
-        "medae_h":  float(np.median(dh)),
+        "error_fase_medio_h":    float(dh.mean()),
+        "error_fase_h":  float(np.median(dh)),
         "rho_circ": circular_correlation(tt, th),
         "rho_fl":   fisher_lee_correlation(tt, th),
         "tau":      kendall_tau_fixed_cut(tt, th),
         # invariante al marco, es el diagnostico
-        "tau_circ": tau_circular(tt, th),
+        "tau_circular": tau_circular(tt, th),
     }
     # El sentido de giro, como columna propia. Va aparte del error porque son
     # cosas distintas: el orden puede estar bien recuperado y el ciclo
-    # reportarse al reves, y entonces mae_h mide la suerte de la orientacion y
+    # reportarse al reves, y entonces error_fase_medio_h mide la suerte de la orientacion y
     # no la calidad de la reconstruccion. Promediada sobre replicas da la tasa
     # de acierto de orientacion.
-    salida["orientacion_ok"] = float(salida["tau_circ"] > 0.0)
+    salida["acierto_sentido"] = float(salida["tau_circular"] > 0.0)
     for tol in TOLERANCIAS_H:
         salida[f"p{int(tol)}"] = float((dh <= tol).mean())
-    salida["mae_h_oracle"] = oracle_mae_h(tt, th)
+    salida["error_orden_h"] = error_orden_h(tt, th)
     return salida

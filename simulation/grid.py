@@ -39,7 +39,7 @@ from simulation.truth import SimConfig
 # que el eje de senal-ruido se realiza fijando sigma y moviendo la amplitud.
 SIGMA_BASE = 1.0
 
-# Niveles de A/sigma. Por debajo de 1 el orden no se reconstruye (oraculo 3,3
+# Niveles de A/sigma. Por debajo de 1 el orden no se reconstruye (error del orden relativo 3,3
 # a 3,9 h, medido) y gastar replicas ahi solo produce tasa de fallo. La calidad
 # del orden satura en 1,5 y la orientacion en 2, asi que la transicion esta
 # entre 1 y 2 y se muestrea con tres niveles. El 4 es el regimen saturado. El
@@ -245,12 +245,20 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
         # Tres pares con el mismo SNR y distinta escala absoluta. Si el
         # pipeline solo ve A/sigma, los dos miembros de cada par tienen que
         # dar metricas identicas.
+        #
+        # Los dos miembros COMPARTEN la semilla, y se deriva del cociente y no
+        # de A y sigma por separado: asi los dos generan los mismos tiempos y
+        # el mismo ruido estandar, y la matriz de uno es exactamente la del
+        # otro multiplicada por 4. Con semillas distintas se compararian dos
+        # matrices aleatorias distintas y la prueba no probaria nada, que es
+        # lo que paso en la primera version de este bloque.
         for snr in (1.0, 2.0, 4.0):
             for sigma in (SIGMA_BASE, SIGMA_BASE * 4.0):
                 cfg = _cfg(N_CENTRAL, MUESTREO_CENTRAL, OMEGA_CENTRAL, snr,
                            sigma=sigma)
                 for rep in range(reps):
-                    celdas.append(Cell(bloque, _con_semilla(bloque, cfg, rep),
+                    semilla = cell_seed(bloque, f"snr{snr}", rep)
+                    celdas.append(Cell(bloque, replace(cfg, seed=semilla),
                                        GCORE_CENTRAL, "base", por_defecto, rep))
         return celdas
 

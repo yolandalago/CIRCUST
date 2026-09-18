@@ -16,8 +16,8 @@ def test_el_esquema_del_csv_tiene_lo_que_pide_la_spec():
         "aggregation", "consensus_scale",
         "status", "error",
         # metricas
-        "mae_h", "medae_h", "rho_circ", "tau", "tau_circ", "orientacion_ok",
-        "p1", "p2", "p4", "mae_h_oracle",
+        "error_fase_medio_h", "error_fase_h", "rho_circ", "tau", "tau_circular", "acierto_sentido",
+        "p1", "p2", "p4", "error_orden_h",
         # observables sin la verdad
         "r2_anchor", "pares_ok", "evidencia", "desacuerdo_K",
         "n_top", "n_outliers", "n_evaluadas", "direction_flips",
@@ -46,8 +46,8 @@ def test_una_celda_sin_ruido_produce_una_fila_completa():
     assert fila["status"] == "ok"
     assert fila["n_evaluadas"] > 0
     # sin ruido y con omega moderada la reconstruccion tiene que ser buena
-    assert fila["tau_circ"] > 0.9
-    assert fila["orientacion_ok"] == 1.0
+    assert fila["tau_circular"] > 0.9
+    assert fila["acierto_sentido"] == 1.0
 
 
 def test_un_fallo_de_las_etapas_0_a_3_se_registra_y_no_revienta(monkeypatch):
@@ -67,7 +67,7 @@ def test_un_fallo_de_las_etapas_0_a_3_se_registra_y_no_revienta(monkeypatch):
     assert len(filas) == 1
     assert filas[0]["status"] == "fallo"
     assert "conjunto TOP" in filas[0]["error"]
-    assert np.isnan(filas[0]["mae_h"])
+    assert np.isnan(filas[0]["error_fase_medio_h"])
     assert not np.isnan(filas[0]["t_total_s"])
 
 

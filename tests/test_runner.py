@@ -176,7 +176,7 @@ def test_las_metricas_del_atlas_salen_en_rango(celda_pequena):
     assert m["atlas_n_evaluados"] > 0
     # con A/sigma = 4 el ajuste tiene que ser bueno, si no la medida no
     # discriminaria nada mas abajo
-    assert m["atlas_rmse_curva"] < 0.5
+    assert m["atlas_error_onda"] < 0.5
     assert abs(m["atlas_err_pico_h"]) < 3.0
 
 

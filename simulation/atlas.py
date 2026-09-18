@@ -46,7 +46,7 @@ El giro global
 --------------
 Los tiempos de pico del atlas viven en la escala circular estimada, que puede
 estar girada respecto de la verdadera. Ese giro es un error de anclaje, ya
-medido por ``mae_h`` sobre las muestras, y si se dejara dentro dominaria el
+medido por ``error_fase_medio_h`` sobre las muestras, y si se dejara dentro dominaria el
 error de pico y taparia justo lo que se quiere ver. Con ``quitar_giro`` se
 descuenta el giro comun a todos los genes y se registra aparte.
 """
@@ -65,11 +65,11 @@ from simulation.truth import TWO_PI
 _MALLA = np.linspace(0.0, TWO_PI, 360, endpoint=False)
 
 _CLAVES = (
-    "atlas_rmse_curva",
-    "atlas_err_pico_h", "atlas_err_pico_sd_h",
+    "atlas_error_onda",
+    "atlas_err_pico_h", "atlas_variabilidad_pico_h",
     "atlas_err_valle_h", "atlas_err_valle_sd_h",
     "atlas_err_subida_h",
-    "atlas_omega_sesgo", "atlas_omega_sd", "atlas_omega_rmse",
+    "atlas_sesgo_omega", "atlas_omega_sd", "atlas_omega_rmse",
     "atlas_r2_mediana",
     "atlas_giro_h",
 )
@@ -216,14 +216,14 @@ def atlas_metrics(
     salida.update({
         # mediana: el RMSE por gen ya es una media cuadratica, y un solo gen
         # mal ajustado no debe decidir la celda
-        "atlas_rmse_curva":   float(np.median(rmse)),
+        "atlas_error_onda":   float(np.median(rmse)),
         # media: un sesgo es una media por definicion, y la sd va aparte
         "atlas_err_pico_h":   float(e_pico.mean()),
-        "atlas_err_pico_sd_h": float(e_pico.std(ddof=0)),
+        "atlas_variabilidad_pico_h": float(e_pico.std(ddof=0)),
         "atlas_err_valle_h":  float(e_valle.mean()),
         "atlas_err_valle_sd_h": float(e_valle.std(ddof=0)),
         "atlas_err_subida_h": float(np.abs(e_pico - e_valle).mean()),
-        "atlas_omega_sesgo":  float(e_omega.mean()),
+        "atlas_sesgo_omega":  float(e_omega.mean()),
         "atlas_omega_sd":     float(e_omega.std(ddof=0)),
         "atlas_omega_rmse":   float(np.sqrt(np.mean(e_omega ** 2))),
         "atlas_r2_mediana":   float(np.median(r2)),

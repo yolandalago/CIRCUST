@@ -31,7 +31,7 @@ Tres decisiones de agregacion, todas tomadas midiendo y no por costumbre
    Lee, que no necesita direccion media.
 
 2. **La orientacion se agrega como TASA de acierto**, no como mediana, porque
-   es una proporcion. Y va en columna propia porque ``medae_h`` mezcla dos
+   es una proporcion. Y va en columna propia porque ``error_fase_h`` mezcla dos
    cosas: si el sentido de giro sale invertido da 5 a 7 h aunque el orden sea
    perfecto, con lo que en las celdas donde la orientacion no es decidible esa
    metrica mide suerte y no reconstruccion.
@@ -68,36 +68,67 @@ CLAVE_REPLICA = FACTORES + ["rep"]
 FMM_REFERENCIA    = "base"
 METODO_REFERENCIA = "best_k:r2_median"
 
+# Nombre largo de cada medida, el que ven las figuras y las tablas del
+# capitulo. Las columnas del CSV llevan el nombre corto de la izquierda.
+ETIQUETAS = {
+    "error_orden_h":             "error del orden relativo (h)",
+    "error_fase_h":              "error de fase absoluta (h)",
+    "error_fase_medio_h":        "error de fase absoluta, media (h)",
+    "concordancia":              "concordancia circular",
+    "tau_circular":              "tau circular con signo",
+    "acierto_sentido":           "acierto del sentido de giro",
+    "atlas_error_onda":          "error de la onda del atlas",
+    "atlas_variabilidad_pico_h": "variabilidad del error en la hora del pico (h)",
+    "atlas_sesgo_omega":         "sesgo de omega",
+    "atlas_vpp":                 "fraccion de genes ritmicos en el atlas",
+    "rho_fl":                    "correlacion circular de Fisher y Lee",
+    "rho_circ":                  "correlacion circular de Jammalamadaka",
+    "tau":                       "tau de Kendall con corte fijo",
+    "n_top":                     "tamano del conjunto TOP",
+    "snr":                       "A/sigma",
+    "n_samples":                 "n muestras",
+    "sampling":                  "muestreo",
+    "omega":                     "omega",
+    "n_genes":                   "n genes",
+    "prop_rhythmic":             "proporcion de ritmicos",
+    "n_core":                    "genes core declarados",
+}
+
+
+def etiqueta(clave: str) -> str:
+    """Nombre largo de una medida o factor, o la clave si no tiene."""
+    return ETIQUETAS.get(clave, clave)
+
 # Medidas continuas, se agregan con mediana.
 #
-# Va ``abs_tau_circ`` y no ``tau_circ``. ``tau_circ`` cambia de signo cuando el
+# Va ``concordancia`` y no ``tau_circular``. ``tau_circular`` cambia de signo cuando el
 # ciclo se recorre al reves, de modo que su SIGNO y su MAGNITUD responden a dos
 # preguntas distintas: el signo dice la orientacion y la magnitud la calidad
-# del orden. ``orientacion_ok`` se define como ``tau_circ > 0``, asi que el
+# del orden. ``acierto_sentido`` se define como ``tau_circular > 0``, asi que el
 # signo ya esta contado en su propia columna. Resumir con signo mezcla las
 # dos: cuatro replicas +0,8 +0,8 -0,8 -0,8 dan mediana 0,0, que se lee como
 # "no se recupero nada" cuando la calidad real es 0,8 en las cuatro.
-MEDIDAS = ["medae_h", "mae_h", "mae_h_oracle", "abs_tau_circ",
+MEDIDAS = ["error_fase_h", "error_fase_medio_h", "error_orden_h", "concordancia",
            "rho_fl", "rho_circ", "tau",
-           "p2", "r2_anchor", "evidencia", "desacuerdo_K", "n_top"]
+           "p2", "r2_anchor", "evidencia", "n_top"]
 
 # Proporciones, se agregan con media porque son tasas.
-TASAS = ["orientacion_ok"]
+TASAS = ["acierto_sentido"]
 
 # Las cuatro del atlas que van a las tablas del capitulo. Cada una responde a
 # una pregunta distinta:
 #
-#   resumen       atlas_rmse_curva      libre de parametrizacion
-#   interpretable atlas_err_pico_sd_h   en horas
-#   mecanismo     atlas_omega_sesgo     por que el estabilizado mejora
+#   resumen       atlas_error_onda      libre de parametrizacion
+#   interpretable atlas_variabilidad_pico_h   en horas
+#   mecanismo     atlas_sesgo_omega     por que el estabilizado mejora
 #   practica      atlas_vpp             cuantos genes del atlas son ritmicos
-MEDIDAS_ATLAS = ["atlas_rmse_curva", "atlas_err_pico_sd_h",
-                 "atlas_omega_sesgo", "atlas_vpp"]
+MEDIDAS_ATLAS = ["atlas_error_onda", "atlas_variabilidad_pico_h",
+                 "atlas_sesgo_omega", "atlas_vpp"]
 
 # Medidas de orden sobre las que se contrastan los metodos de resumen. El
-# oraculo y |tau_circ| miden el orden al margen del anclaje, medae_h es el
+# error del orden relativo y |tau_circular| miden el orden al margen del anclaje, error_fase_h es el
 # resultado conjunto que ve el usuario.
-MEDIDAS_ORDEN = ["mae_h_oracle", "abs_tau_circ", "medae_h"]
+MEDIDAS_ORDEN = ["error_orden_h", "concordancia", "error_fase_h"]
 
 TIEMPOS = ["t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s",
            "t_robust_s", "t_total_s"]
@@ -133,12 +164,12 @@ def _derivadas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Columnas que se calculan de otras y por eso no ocupan sitio en el CSV.
 
-    ``abs_tau_circ`` es la calidad del orden al margen del sentido de giro.
+    ``concordancia`` es la calidad del orden al margen del sentido de giro.
     ``metodo`` es la etiqueta del metodo de resumen.
     """
     df = df.copy()
-    if "tau_circ" in df.columns and "abs_tau_circ" not in df.columns:
-        df["abs_tau_circ"] = df["tau_circ"].abs()
+    if "tau_circular" in df.columns and "concordancia" not in df.columns:
+        df["concordancia"] = df["tau_circular"].abs()
     if "robust_method" in df.columns and "metodo" not in df.columns:
         df["metodo"] = _etiqueta_metodo(df)
     return df
@@ -275,7 +306,7 @@ def tabla_atlas(df: pd.DataFrame,
     """
     g = _rejilla(df)
     g = g[(g["metodo"] == metodo) & (g["status"] == "ok")
-          & (g["orientacion_ok"] == 1.0)]
+          & (g["acierto_sentido"] == 1.0)]
     if g.empty:
         raise ValueError("no hay filas con orientacion resuelta en la rejilla")
     medidas = [m for m in MEDIDAS_ATLAS if m in g.columns]
@@ -331,13 +362,13 @@ def contraste_fmm(df: pd.DataFrame, metodo: str = METODO_REFERENCIA,
     """
     r = _rejilla(df)
     r = r[r["metodo"] == metodo]
-    medidas = MEDIDAS_ATLAS + MEDIDAS_ORDEN + ["orientacion_ok", "t_total_s"]
+    medidas = MEDIDAS_ATLAS + MEDIDAS_ORDEN + ["acierto_sentido", "t_total_s"]
     par = _emparejar(r[r["fmm_method"] == "base"],
                      r[r["fmm_method"] == "stabilized"],
                      medidas, ("_base", "_stab"))
     if solo_orientadas:
-        par = par[(par["orientacion_ok_base"] == 1.0)
-                  & (par["orientacion_ok_stab"] == 1.0)]
+        par = par[(par["acierto_sentido_base"] == 1.0)
+                  & (par["acierto_sentido_stab"] == 1.0)]
     return par.reset_index(drop=True)
 
 
@@ -354,7 +385,7 @@ def contraste_metodos(df: pd.DataFrame, fmm: str = FMM_REFERENCIA,
     r = _rejilla(df)
     r = r[r["fmm_method"] == fmm]
     ref = r[r["metodo"] == referencia]
-    medidas = MEDIDAS_ORDEN + ["orientacion_ok", "desacuerdo_K", "t_robust_s"]
+    medidas = MEDIDAS_ORDEN + ["acierto_sentido", "t_robust_s"]
     trozos = []
     for metodo, sub in r.groupby("metodo"):
         if metodo == referencia:
@@ -518,8 +549,8 @@ def calibracion_orientacion(df: pd.DataFrame, indicador: str = "evidencia",
     return pd.DataFrame({
         "n":                  g.size(),
         f"{indicador}_medio": g[indicador].median(),
-        "acierto_orientacion": g["orientacion_ok"].mean(),
-        "medae_h":            g["medae_h"].median(),
+        "acierto_orientacion": g["acierto_sentido"].mean(),
+        "error_fase_h":            g["error_fase_h"].median(),
     })
 
 
@@ -552,7 +583,7 @@ def _figura_lineas(datos, x, y, hue, titulo, xlabel, ylabel, out: Path) -> None:
     fig, ax = plt.subplots(figsize=(7.0, 4.2))
     for nivel, sub in datos.groupby(hue):
         sub = sub.sort_values(x)
-        ax.plot(sub[x], sub[y], marker="o", label=f"{hue} = {nivel}")
+        ax.plot(sub[x], sub[y], marker="o", label=f"{etiqueta(hue)} = {nivel}")
     niveles = sorted(datos[x].unique())
     ax.set_xticks(niveles, [f"{v:g}" for v in niveles])
     ax.set_xlabel(xlabel)
@@ -570,24 +601,24 @@ def figura_snr(df: pd.DataFrame, out: Path) -> None:
     """Degradacion del error con la senal-ruido, una serie por muestreo."""
     p = _referencia(df)
     p = p[p["status"] == "ok"]
-    datos = p.groupby(["sampling", "snr"])["medae_h"].median().reset_index()
-    _figura_lineas(datos, "snr", "medae_h", "sampling",
+    datos = p.groupby(["sampling", "snr"])["error_fase_h"].median().reset_index()
+    _figura_lineas(datos, "snr", "error_fase_h", "sampling",
                    "Reconstruccion frente a la razon senal-ruido",
-                   "A / sigma", "Mediana del error absoluto (h)", out)
+                   etiqueta("snr"), "mediana del " + etiqueta("error_fase_h"), out)
 
 
 def figura_orientacion(df: pd.DataFrame, out: Path) -> None:
     """Tasa de acierto de orientacion, que va aparte del error."""
     p = _referencia(df)
     p = p[p["status"] == "ok"]
-    datos = p.groupby(["omega", "snr"])["orientacion_ok"].mean().reset_index()
-    _figura_lineas(datos, "snr", "orientacion_ok", "omega",
+    datos = p.groupby(["omega", "snr"])["acierto_sentido"].mean().reset_index()
+    _figura_lineas(datos, "snr", "acierto_sentido", "omega",
                    "Acierto del sentido de giro",
-                   "A / sigma", "Proporcion de celdas bien orientadas", out)
+                   etiqueta("snr"), "fraccion de replicas con el sentido correcto", out)
 
 
 def figura_efectos(par: pd.DataFrame, medida: str, titulo: str,
-                   ylabel: str, out: Path, por: str | None = None) -> None:
+                   out: Path, por: str | None = None) -> None:
     """
     Efectos principales de un contraste: un panel por factor, la mediana del
     delta por nivel con su rango intercuartilico. Con ``por`` se dibuja una
@@ -612,8 +643,8 @@ def figura_efectos(par: pd.DataFrame, medida: str, titulo: str,
         ax.set_xticks(np.arange(len(m)), [f"{v:g}" if isinstance(v, float) else str(v)
                                           for v in m.index], rotation=45)
         ax.axhline(0, color="0.4", lw=0.8, ls="--")
-        ax.set_title(f, fontsize=9)
-    axes[0].set_ylabel(ylabel)
+        ax.set_title(etiqueta(f), fontsize=9)
+    axes[0].set_ylabel("cambio en el\n" + etiqueta(medida), fontsize=8)
     if por is not None:
         axes[-1].legend(frameon=False, fontsize=7, title=por)
     fig.suptitle(titulo, fontsize=10)
@@ -672,14 +703,14 @@ def main() -> None:
             _escribir(f"fmm_efectos_{m}", lambda m=m: efectos_principales(fmm, m), tablas)
             _escribir(f"fmm_modelo_{m}",  lambda m=m: modelo_lineal(fmm, m), tablas)
         _escribir("fmm_interaccion_n_snr",
-                  lambda: interaccion(fmm, "atlas_rmse_curva", "n_samples", "snr"),
+                  lambda: interaccion(fmm, "atlas_error_onda", "n_samples", "snr"),
                   tablas)
         _escribir("fmm_interaccion_omega_n",
-                  lambda: interaccion(fmm, "atlas_rmse_curva", "omega", "n_samples"),
+                  lambda: interaccion(fmm, "atlas_error_onda", "omega", "n_samples"),
                   tablas)
-        figura_efectos(fmm, "atlas_rmse_curva",
+        figura_efectos(fmm, "atlas_error_onda",
                        "FMM estabilizado menos base (negativo = mejora)",
-                       "delta RMSE de la curva", imagenes / "sim-fmm-efectos.png")
+                       imagenes / "sim-fmm-efectos.png")
         print("  escrita sim-fmm-efectos.png")
     except (KeyError, ValueError) as exc:
         print(f"  contraste FMM omitido: {exc}")
@@ -693,11 +724,10 @@ def main() -> None:
         for metodo, sub in met.groupby("metodo"):
             corto = metodo.replace(":", "_")
             _escribir(f"metodos_modelo_{corto}",
-                      lambda sub=sub: modelo_lineal(sub, "mae_h_oracle"), tablas)
-        figura_efectos(met, "mae_h_oracle",
+                      lambda sub=sub: modelo_lineal(sub, "error_orden_h"), tablas)
+        figura_efectos(met, "error_orden_h",
                        "Metodo de resumen menos best_k:r2_median (negativo = mejora)",
-                       "delta MAE del oraculo (h)", imagenes / "sim-metodos-efectos.png",
-                       por="metodo")
+                       imagenes / "sim-metodos-efectos.png", por="metodo")
         print("  escrita sim-metodos-efectos.png")
     except (KeyError, ValueError) as exc:
         print(f"  contraste de metodos omitido: {exc}")

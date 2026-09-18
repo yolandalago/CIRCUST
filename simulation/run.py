@@ -44,10 +44,10 @@ COLUMNAS: list[str] = [
     # estado
     "status", "error",
     # metricas en el marco tal cual, es lo que se reporta
-    "mae_h", "medae_h", "rho_circ", "rho_fl", "tau",
+    "error_fase_medio_h", "error_fase_h", "rho_circ", "rho_fl", "tau",
     "p1", "p2", "p4",
     # metricas invariantes al marco, es el diagnostico
-    "tau_circ", "orientacion_ok", "mae_h_oracle",
+    "tau_circular", "acierto_sentido", "error_orden_h",
     # observables sin la verdad, para calibrar el aviso de fase absoluta
     "r2_anchor", "pares_ok", "evidencia", "desacuerdo_K",
     "n_top", "n_outliers", "n_evaluadas", "direction_flips",
@@ -64,8 +64,8 @@ COLUMNAS: list[str] = [
 # interrupcion es a lo sumo un lote, y ``existing_ids`` reanuda solo.
 LOTE_ESCRITURA = 50
 
-_METRICAS = ("mae_h", "medae_h", "rho_circ", "rho_fl", "tau", "tau_circ",
-             "orientacion_ok", "p1", "p2", "p4", "mae_h_oracle")
+_METRICAS = ("error_fase_medio_h", "error_fase_h", "rho_circ", "rho_fl", "tau", "tau_circular",
+             "acierto_sentido", "p1", "p2", "p4", "error_orden_h")
 
 
 def _fila_base(
@@ -145,7 +145,7 @@ def run_cell_group(
             fila["desacuerdo_K"]    = etapa4.desacuerdo_K
             fila["direction_flips"] = etapa4.direction_flips
             # quitar_giro: el giro global de la escala es error de anclaje, ya
-            # medido por mae_h, y dejarlo dentro taparia la calidad del ajuste
+            # medido por error_fase_medio_h, y dejarlo dentro taparia la calidad del ajuste
             fila.update(atlas_metrics(etapa4.atlas, truth.gene_params,
                                       quitar_giro=True))
         except Exception as exc:                  # noqa: BLE001

@@ -4,7 +4,7 @@ import pytest
 
 from simulation.metrics import (
     circular_correlation, circular_distance, evaluate,
-    fisher_lee_correlation, kendall_tau_fixed_cut, oracle_mae_h,
+    fisher_lee_correlation, kendall_tau_fixed_cut, error_orden_h,
     tau_circular, to_hours,
 )
 from simulation.truth import TWO_PI
@@ -99,18 +99,18 @@ def test_tau_circular_vale_cero_sin_relacion_y_degrada_con_el_ruido():
 def test_oracle_encuentra_la_rotacion_y_la_reflexion():
     theta = _ang(np.linspace(0, 24, 48, endpoint=False))
     estimado = (-theta + 2.0) % TWO_PI     # reflejado y rotado
-    assert oracle_mae_h(theta, estimado) < 0.1
-    assert oracle_mae_h(theta, theta) == pytest.approx(0.0, abs=1e-9)
+    assert error_orden_h(theta, estimado) < 0.1
+    assert error_orden_h(theta, theta) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_evaluate_devuelve_todas_las_claves():
     theta = np.random.default_rng(2).uniform(0, TWO_PI, 24)
     m = evaluate(theta, theta)
-    esperadas = {"mae_h", "medae_h", "rho_circ", "rho_fl", "tau",
-                 "tau_circ", "orientacion_ok", "p1", "p2", "p4",
-                 "mae_h_oracle"}
+    esperadas = {"error_fase_medio_h", "error_fase_h", "rho_circ", "rho_fl", "tau",
+                 "tau_circular", "acierto_sentido", "p1", "p2", "p4",
+                 "error_orden_h"}
     assert set(m) == esperadas
-    assert m["mae_h"] == pytest.approx(0.0)
+    assert m["error_fase_medio_h"] == pytest.approx(0.0)
     assert m["p1"] == pytest.approx(1.0)
     assert m["rho_circ"] == pytest.approx(1.0)
 
@@ -156,7 +156,7 @@ def test_rho_es_solido_en_mediana_pero_tiene_cola_de_signo_contrario():
     assert rhos.min() < 0.0
 
 
-def test_orientacion_ok_marca_el_sentido_de_giro():
+def test_acierto_sentido_marca_el_sentido_de_giro():
     """
     Columna separada del error porque son cosas distintas: el orden puede
     estar bien recuperado y el sentido al reves. Promediada sobre replicas da
@@ -167,10 +167,10 @@ def test_orientacion_ok_marca_el_sentido_de_giro():
     theta = np.sort(rng.uniform(0, TWO_PI, 40))
     ruido = (theta + rng.normal(0, 0.2, 40)) % TWO_PI
 
-    assert evaluate(theta, ruido)["orientacion_ok"] == 1.0
-    assert evaluate(theta, (-ruido) % TWO_PI)["orientacion_ok"] == 0.0
+    assert evaluate(theta, ruido)["acierto_sentido"] == 1.0
+    assert evaluate(theta, (-ruido) % TWO_PI)["acierto_sentido"] == 0.0
     # rotar no cambia el sentido de giro
-    assert evaluate(theta, (ruido + 2.5) % TWO_PI)["orientacion_ok"] == 1.0
+    assert evaluate(theta, (ruido + 2.5) % TWO_PI)["acierto_sentido"] == 1.0
 
 
 # ---------------------------------------------------------------------------

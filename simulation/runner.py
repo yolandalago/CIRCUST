@@ -30,7 +30,7 @@ identicos por construccion.
 
 Indicadores observables
 -----------------------
-``mae_h_oracle`` y ``tau_circ`` necesitan los tiempos verdaderos, asi que
+``error_orden_h`` y ``tau_circular`` necesitan los tiempos verdaderos, asi que
 sirven para caracterizar el metodo en simulacion pero no para aplicarlo a un
 tejido nuevo. Estos cuatro si se calculan sin la verdad, y el estudio de
 simulacion sirve para calibrar su relacion con el error real:
@@ -168,7 +168,7 @@ def _diagnostico_pares(
 
     Es la variable candidata a decidir si se puede confiar en el sentido de
     giro de un tejido sin conocer la verdad. El umbral no se fija aqui: lo
-    calibra el estudio, comparando esta cantidad contra ``orientacion_ok``.
+    calibra el estudio, comparando esta cantidad contra ``acierto_sentido``.
 
     Ambos son ``nan`` si ningun par es evaluable, que es informacion distinta
     de que ningun par se cumpla.
