@@ -21,8 +21,9 @@ La primera version de este modulo decia que la penalizacion de rugosidad
 parte, y no la principal. Lo que la descomposicion del error de omega muestra
 (figura D) es:
 
-- La **desviacion tipica** de omega entre genes baja SIEMPRE, en las quince
-  celdas y en los tres niveles de omega, alrededor de un 40 %. Eso es lo que
+- La **desviacion tipica** de omega entre genes baja SIEMPRE, en las 36
+  celdas omega x n x A/sigma y en los tres niveles de omega, entre un 25 y
+  un 50 %. Eso es lo que
   hace la penalizacion y no depende del regimen.
 - El **sesgo** es lo que cambia de signo. La penalizacion empuja omega hacia
   arriba, o sea hacia ondas mas suaves, siempre. Eso corrige al base cuando
@@ -32,7 +33,8 @@ parte, y no la principal. Lo que la descomposicion del error de omega muestra
 
 O sea: se paga sesgo a cambio de varianza, y sale a cuenta solo mientras la
 varianza sea el termino dominante, que es cuando hay poca informacion. De ahi
-el gradiente de la figura A y el cruce en torno a A/sigma = 2 a 3.
+el gradiente de la figura A y el cruce entre A/sigma = 2 y 4, antes
+cuanto mayor es n.
 
 Contarlo asi importa: "mi metodo reduce la varianza del estimador a costa de
 sesgo, y eso compensa por debajo de tal umbral" es una afirmacion estadistica
@@ -85,9 +87,10 @@ from simulation.analyze import (
 #   - omega 0,1 es el regimen donde el estabilizado es peor
 # Con estas tres se cuenta la historia entera, y cuestan minutos.
 CELDAS_POR_GEN = (
-    # (n, omega, snr, etiqueta)
-    (24, 0.7, 1.0, "n bajo, senal baja"),
-    (96, 0.7, 4.0, "n alto, senal alta"),
+    # (n, omega, snr, etiqueta). Niveles de la rejilla, para que las figuras
+    # por gen hablen del mismo diseno que las tablas.
+    (24, 0.9, 1.0, "n bajo, senal baja"),
+    (96, 0.9, 4.0, "n alto, senal alta"),
     (48, 0.1, 2.0, "onda muy apuntada"),
 )
 
@@ -352,7 +355,7 @@ def figura_d_sesgo_omega(par: pd.DataFrame, destino: Path) -> None:
     ante quien pregunte si no sera casualidad.
 
     Fila de abajo: la desviacion tipica de omega entre genes **baja siempre**,
-    en las quince celdas y en los tres niveles de omega, alrededor de un 40 %.
+    en las 36 celdas y en los tres niveles de omega, entre un 25 y un 50 %.
     Eso es lo que hace la penalizacion de rugosidad, y no depende del regimen.
 
     Fila de arriba: el sesgo es el que cambia de signo. Con poca informacion
@@ -364,7 +367,8 @@ def figura_d_sesgo_omega(par: pd.DataFrame, destino: Path) -> None:
 
     Las dos filas juntas son el compromiso sesgo-varianza de manual: se paga
     sesgo a cambio de varianza, y sale a cuenta solo mientras la varianza sea
-    el termino dominante. El cruce esta en torno a A/sigma = 2 a 3.
+    el termino dominante. El cruce esta entre A/sigma = 2 y 4, y llega antes
+    cuanto mayor es n.
     """
     plt = _mpl()
     omegas = sorted(par.omega.unique())
@@ -413,11 +417,11 @@ def figura_e_omega_por_gen(g: pd.DataFrame, destino: Path) -> None:
     - **n bajo, senal baja.** Con pocos puntos el FMM base tiene libertad para
       poner un pico estrechisimo entre dos observaciones, y la distribucion se
       desparrama por todo el rango con masa contra el limite inferior. El
-      estabilizado se concentra en torno al valor verdadero. Mediana 0,37
-      contra 0,66, con omega verdadero 0,7.
-    - **n alto, senal alta.** El base acierta de lleno, mediana 0,69 sobre un
-      valor verdadero de 0,7, y el estabilizado se desplaza a 0,84. Aqui la
-      regularizacion solo estorba.
+      estabilizado se concentra en torno al valor verdadero. Mediana 0,41
+      contra 0,70, con omega verdadero 0,9.
+    - **n alto, senal alta.** El base acierta de lleno, mediana 0,91 sobre un
+      valor verdadero de 0,9, y el estabilizado se desplaza a 0,94 con la
+      mitad de dispersion. Aqui la regularizacion apenas cambia nada.
     - **onda muy apuntada.** El base vuelve a acertar, 0,13 sobre 0,1, y el
       estabilizado se va a 0,57. Es el peor caso para la penalizacion, porque
       la rugosidad que castiga es aqui una propiedad real de la onda.
@@ -428,7 +432,7 @@ def figura_e_omega_por_gen(g: pd.DataFrame, destino: Path) -> None:
     estabilizado es menor tambien en omega = 0,1 (figura D), pero en esta
     celda concreta, con solo veinte genes evaluables, no se aprecia. Esta
     figura sirve para ver la FORMA de cada fallo; la afirmacion cuantitativa
-    sobre dispersion es la de la figura D, que tiene 2700 replicas detras.
+    sobre dispersion es la de la figura D, que tiene 10.000 pares detras.
     """
     plt = _mpl()
     celdas = list(dict.fromkeys(g.celda))
