@@ -41,6 +41,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -127,19 +128,45 @@ def export_for_r(
 
 
 def time_python(matrix: pd.DataFrame, truth: SimulationTruth,
-                n_core: int) -> dict[str, float]:
+                n_core: int, celda_dir: Path | None = None) -> dict[str, float]:
     """
     Tiempos por etapa de una ejecucion completa en Python, FMM base y el
     metodo de resumen de referencia, sin construir el atlas: el R original
     tampoco lo construye dentro de las etapas que se cronometran.
+
+    Con ``celda_dir`` vuelca ademas las dos salidas que se comparan con R:
+
+    ``py_fases_preliminar.csv``
+        La fase por muestra del ORDEN PRELIMINAR, que es la salida homologa a
+        la que reporta R. El CIRCUST original resume las K repeticiones con
+        una mediana de parametros FMM y no las colapsa en un orden de
+        muestras, asi que la unica fase por muestra que publica es esta.
+    ``py_fases_robusto.csv``
+        La fase por muestra tras la Etapa 4. No tiene equivalente en R, y esa
+        ausencia es justamente el hueco que llena este trabajo.
+
+    El volcado va fuera de las dos regiones cronometradas, asi que no
+    contamina los tiempos.
     """
     t = time.perf_counter()
     estado = run_stages_0_3(matrix, truth, n_core, "base")
     t_0_3 = time.perf_counter() - t
 
     t = time.perf_counter()
-    run_stage_4(estado, truth, RobustConfig(), "base", con_atlas=False)
+    etapa4 = run_stage_4(estado, truth, RobustConfig(), "base", con_atlas=False)
     t_4 = time.perf_counter() - t
+
+    if celda_dir is not None:
+        celda_dir = Path(celda_dir)
+        celda_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"sample": estado.sample_names,
+                      "phase": np.asarray(estado.theta_pre, dtype=float)}) \
+          .to_csv(celda_dir / "py_fases_preliminar.csv", index=False)
+        etapa4.theta_hat.rename_axis("sample").reset_index(name="phase") \
+              .to_csv(celda_dir / "py_fases_robusto.csv", index=False)
+        pd.DataFrame({"sample": truth.sample_names,
+                      "t_true": truth.t_true}) \
+          .to_csv(celda_dir / "verdad.csv", index=False)
 
     tiempos = {k: float(v) for k, v in estado.timing.items()}
     tiempos["robust_order"] = t_4
@@ -152,6 +179,10 @@ def run_r(celda_dir: Path, etiqueta: str) -> Path:
     """
     Lanza el benchmark de R sobre la matriz renombrada de una celda.
 
+    Con ``--dump`` R escribe ademas ``r_fases.csv`` y ``r_atlas.csv`` en el
+    directorio de la celda, que es lo que permite comparar su precision con la
+    de Python y no solo su velocidad.
+
     Devuelve la ruta del ``timing_r.csv`` que R escribe. Un fallo de R lanza
     ``CalledProcessError`` con la salida capturada, para que quede en el log.
     """
@@ -162,7 +193,8 @@ def run_r(celda_dir: Path, etiqueta: str) -> Path:
          "--matrix", str(celda_dir / "matriz_r.csv"),
          "--reps", "1",
          "--label", etiqueta,
-         "--out", str(destino)],
+         "--out", str(destino),
+         "--dump", str(celda_dir)],
         cwd=PROJECT_ROOT, check=True, capture_output=True, text=True,
     )
     return destino
@@ -199,8 +231,22 @@ def _nombre(cfg: SimConfig, rep: int) -> str:
 
 
 def _anadir(destino: Path, filas: pd.DataFrame) -> None:
+    """
+    Anade filas al CSV alineando las columnas con las que ya tiene.
+
+    ``to_csv`` en modo append no reordena nada, escribe los valores en el
+    orden en que vienen. Las filas de R y las de Python se construyen por
+    caminos distintos y no salen en el mismo orden, asi que sin este
+    realineado los tiempos de R aterrizan bajo las cabeceras de Python y el
+    fichero queda inservible. Paso ya una vez.
+    """
     if filas.empty:
         return
+    if destino.exists():
+        columnas = list(pd.read_csv(destino, nrows=0).columns)
+        for falta in [c for c in filas.columns if c not in columnas]:
+            columnas.append(falta)
+        filas = filas.reindex(columns=columnas)
     filas.to_csv(destino, mode="a", header=not destino.exists(), index=False)
 
 
@@ -239,7 +285,8 @@ def main() -> None:
         if args.export_only:
             continue
 
-        tiempos = time_python(matriz, truth, celda.n_core_declared)
+        tiempos = time_python(matriz, truth, celda.n_core_declared,
+                              celda_dir=raiz / nombre)
         filas_py.append(dict(
             implementacion = "python",
             celda          = nombre,

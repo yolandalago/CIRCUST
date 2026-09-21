@@ -47,6 +47,9 @@ OUT_DIR    <- file.path(REPO_ROOT, "validation", "reference")
 # simulacion (simulation/rbench.py), que exporta matriz_r.csv con los genes
 # core ya renombrados a los nombres que este script espera en coreG.
 MATRIX_CSV <- get_opt("--matrix", NA)
+# Directorio donde volcar el resultado estimado, no solo los tiempos. Sirve
+# para comparar la precision de R contra la de Python sobre la misma matriz.
+DUMP_DIR   <- get_opt("--dump", NA)
 OUT_CSV    <- get_opt("--out", file.path(OUT_DIR, "timing_R.csv"))
 LABEL      <- get_opt("--label", "matrixIn")
 if (!is.na(MATRIX_CSV)) MATRIX_CSV <- normalizePath(MATRIX_CSV)
@@ -168,7 +171,30 @@ run_once <- function(inputExample) {
   tt$robust_order <- el(t0)
 
   tt$elapsed_total <- tt$preprocess + tt$preliminary_order + tt$top_genes + tt$robust_order
-  tt
+
+  # Fase estimada por muestra. Es la salida de muestras que reporta CIRCUST:
+  # el orden preliminar, porque la etapa robusta resume las K repeticiones con
+  # una mediana de parametros FMM y no las colapsa en un orden de muestras.
+  #
+  # OJO: cuando basicOder_cores invierte la orientacion reconstruye la matriz
+  # desde cero y solo le asigna rownames, de modo que los nombres de columna
+  # se pierden. En ese caso se recuperan invirtiendo los de la etapa anterior,
+  # que es exactamente lo que hace con los datos.
+  nombres <- colnames(basicO[[3]])
+  if (is.null(nombres)) nombres <- rev(colnames(preOrd[[3]]))
+  fases <- data.frame(sample = nombres, phase = as.numeric(basicO[[2]]))
+
+  # Atlas: parametros FMM por gen y repeticion, tal como los publica
+  # runCIRCUST.R. La mediana sobre las K se hace al analizar.
+  atlas <- data.frame(
+    TOP   = rep(rownames(topRefG), each = K),
+    K     = rep(1:K, times = nrow(topRefG)),
+    robSincro[[1]][, c(1:7, 12)]
+  )
+  colnames(atlas) <- c("TOP", "K", "M", "A", "alpha", "beta", "omega",
+                       "t_U", "t_L", "R2")
+
+  list(tiempos = tt, fases = fases, atlas = atlas)
 }
 
 # --------------------------------------------------------------------------
@@ -186,12 +212,20 @@ setwd(scratch)
 rows <- list()
 for (r in seq_len(N_REPS)) {
   cat(sprintf("\n=== Repeticion %d / %d ===\n", r, N_REPS))
-  tt <- run_once(matrixIn)
+  salida <- run_once(matrixIn)
+  tt <- salida$tiempos
   for (stage in names(tt)) {
     rows[[length(rows) + 1]] <- data.frame(rep = r, stage = stage,
                                            seconds = tt[[stage]])
   }
   cat(sprintf("  total: %.1f s\n", tt$elapsed_total))
+
+  if (!is.na(DUMP_DIR)) {
+    dir.create(DUMP_DIR, showWarnings = FALSE, recursive = TRUE)
+    write.csv(salida$fases, file.path(DUMP_DIR, "r_fases.csv"), row.names = FALSE)
+    write.csv(salida$atlas, file.path(DUMP_DIR, "r_atlas.csv"), row.names = FALSE)
+    cat(sprintf("  volcado en %s\n", DUMP_DIR))
+  }
 }
 
 setwd(REPO_ROOT)
