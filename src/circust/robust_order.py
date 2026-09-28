@@ -466,6 +466,10 @@ class RobustOrderEstimator:
         Kwargs adicionales para ``prepare_dataset`` cuando stab.
     lambda_star : float | None
         Lambda heredado de CPCA (modo stab) — evita recalibrar.
+    fmm_refine : bool
+        Refinamiento local opcional de ``(alpha, omega)`` del FMM estabilizado
+        (Seccion S3.4.4 del suplemento de CircaFMM) en los ajustes de cada
+        repeticion. Por defecto False. Se ignora con ``fmm_method="base"``.
     recalibrate_lambda_per_rep : bool
         Si True, recalibra lambda del FMM estabilizado en cada una de las K
         repeticiones. Si False (default), reusa el ``lambda_star`` heredado
@@ -516,6 +520,7 @@ class RobustOrderEstimator:
         fmm_stab_kwargs:       dict|None  = None,
         lambda_star:           float|None = None,
         recalibrate_lambda_per_rep: bool   = False,
+        fmm_refine:            bool  = False,
         n_jobs:                int   = 1,
         seed:                  int|None   = None,
         verbose:               bool  = True,
@@ -559,6 +564,7 @@ class RobustOrderEstimator:
         self.fmm_stab_kwargs = dict(fmm_stab_kwargs or {})
         self.lambda_star_inherited      = lambda_star
         self.recalibrate_lambda_per_rep = recalibrate_lambda_per_rep
+        self.fmm_refine = fmm_refine
         self.n_jobs  = n_jobs
         self.seed    = seed
         self.verbose = verbose
@@ -932,7 +938,7 @@ class RobustOrderEstimator:
                             and "lambda_star" not in stab_kwargs):
                         stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
                     prepared_k = prepare_dataset(esc_k, **stab_kwargs)
-                    fmm = StabilizedFMMModel(prepared=prepared_k)
+                    fmm = StabilizedFMMModel(prepared=prepared_k, refine=self.fmm_refine)
 
                 core_present = [g for g in core_genes if g in top_k.index]
                 fmm_fits = {}

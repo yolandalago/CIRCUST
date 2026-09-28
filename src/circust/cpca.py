@@ -238,6 +238,12 @@ class CPCA:
         Parametros adicionales para ``prepare_dataset`` cuando
         ``fmm_method="stabilized"`` (ej: ``n_simulations``, ``n_repeats``).
 
+    fmm_refine : bool
+        Activa el refinamiento local opcional de ``(alpha, omega)`` del FMM
+        estabilizado (Seccion S3.4.4, Algoritmo S2 del suplemento de
+        CircaFMM). Por defecto False, como en ``runCircaFMM.R``. Se ignora con
+        ``fmm_method="base"``.
+
     verbose : bool
         Imprimir mensajes de progreso.
 
@@ -270,6 +276,7 @@ class CPCA:
         fmm_num_reps:             int       = 3,
         fmm_method:               str       = "base",
         fmm_stab_kwargs:          dict|None = None,
+        fmm_refine:               bool      = False,
         compute_fmm_fits:         bool      = True,
         verbose:                  bool      = True,
     ) -> None:
@@ -300,6 +307,7 @@ class CPCA:
         self.fmm_num_reps             = fmm_num_reps
         self.fmm_method               = fmm_method
         self.fmm_stab_kwargs          = fmm_stab_kwargs or {}
+        self.fmm_refine               = fmm_refine
         self.verbose                  = verbose
 
         # Lambda calibrado en _fit_initial; se reutiliza en _fit_final y se
@@ -327,7 +335,7 @@ class CPCA:
             if self._cached_lambda_star is None:
                 self._cached_lambda_star = float(prepared.lambda_star)
 
-            return StabilizedFMMModel(prepared=prepared)
+            return StabilizedFMMModel(prepared=prepared, refine=self.fmm_refine)
         return FMMModel(
             length_alpha_grid = self.fmm_length_alpha_grid,
             length_omega_grid = self.fmm_length_omega_grid,

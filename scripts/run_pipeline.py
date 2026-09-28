@@ -193,6 +193,14 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
              "a TopGenes y RobustOrder. Por defecto: base.",
     )
     parser.add_argument(
+        "--fmm-refine", action="store_true",
+        help="Activa el refinamiento local opcional de (alpha, omega) del FMM "
+             "estabilizado (Seccion S3.4.4, Algoritmo S2 del suplemento de "
+             "CircaFMM) en todas las etapas. Solo aplica con "
+             "--fmm-method=stabilized. Por defecto desactivado, como en "
+             "runCircaFMM.R.",
+    )
+    parser.add_argument(
         "--robust-method", choices=["median", "best_k", "aggregate"],
         default="best_k",
         help="Como se resumen las K repeticiones: 'median' (CIRCUST original, "
@@ -276,6 +284,7 @@ def _build_atlas(
     fmm_method:     str,
     cfg:            dict,
     n_jobs:         int | None = None,
+    fmm_refine:     bool = False,
 ) -> pd.DataFrame:
     """
     Construye la tabla [M^TOP] del atlas circadiano del tejido
@@ -346,7 +355,7 @@ def _build_atlas(
             if lambda_star is not None:
                 stab_kwargs["lambda_star"] = float(lambda_star)
             prepared   = prepare_dataset(final_scale, **stab_kwargs)
-            stab_model = StabilizedFMMModel(prepared=prepared)
+            stab_model = StabilizedFMMModel(prepared=prepared, refine=fmm_refine)
             # threading: los workers comparten ``prepared`` en memoria en vez
             # de serializar sus matrices precomputadas hacia cada proceso.
             fits = Parallel(n_jobs=n_jobs, backend="threading")(
@@ -472,6 +481,7 @@ def main() -> None:
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
         fmm_num_reps          = cfg["fmm_reps"],
         fmm_method            = args.fmm_method,
+        fmm_refine            = args.fmm_refine,
         verbose               = True,
     ).run(prep.expr_norm)
     timing["cpca"] = time.perf_counter() - _t
@@ -510,6 +520,7 @@ def main() -> None:
         fmm_num_reps          = cfg["fmm_reps"],
         fmm_method            = args.fmm_method,
         lambda_star           = cpca_result.lambda_star,   # heredado si stabilized
+        fmm_refine            = args.fmm_refine,
         n_jobs                = -1,
         verbose               = True,
     ).run(
@@ -548,6 +559,7 @@ def main() -> None:
         # Carlo, devuelve de 1,23 a 8,76, y esa dispersion supera a la que hay
         # entre repeticiones distintas. Ver el docstring del parametro.
         recalibrate_lambda_per_rep = False,
+        fmm_refine           = args.fmm_refine,
         n_jobs               = -1,   # paralelo: el ajuste FMM por gen es el cuello de botella
         seed                 = args.seed,
         verbose              = True,
@@ -601,6 +613,7 @@ def main() -> None:
         lambda_star    = cpca_result.lambda_star,
         fmm_method     = args.fmm_method,
         cfg            = cfg,
+        fmm_refine     = args.fmm_refine,
     )
     timing["build_atlas"] = time.perf_counter() - _t
     atlas_df.to_csv(output_dir / "circust_atlas.csv", index=False)
@@ -620,6 +633,7 @@ def main() -> None:
         "config":    cfg,
         "algorithm": {
             "fmm_method":    args.fmm_method,
+            "fmm_refine":    bool(args.fmm_refine),
             "robust_method": args.robust_method,
             "aggregation":   (args.aggregation
                               if args.robust_method == "aggregate" else None),

@@ -471,6 +471,11 @@ class TopGeneSelector:
     fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps : int
         Parametros de la rejilla de ajuste FMM.
 
+    fmm_refine : bool
+        Refinamiento local opcional de ``(alpha, omega)`` del FMM estabilizado
+        (Seccion S3.4.4 del suplemento de CircaFMM). Por defecto False. Se
+        ignora con ``fmm_method="base"``.
+
     n_jobs : int
         Numero de procesos para el ajuste en paralelo (ORI y FMM).
         ``-1`` usa todos los nucleos disponibles.
@@ -492,6 +497,7 @@ class TopGeneSelector:
         fmm_method:            str   = "base",
         fmm_stab_kwargs:       dict|None = None,
         lambda_star:           Optional[float] = None,
+        fmm_refine:            bool  = False,
         n_jobs:                int   = -1,
         verbose:               bool  = True,
     ) -> None:
@@ -522,6 +528,7 @@ class TopGeneSelector:
         self.fmm_stab_kwargs       = dict(fmm_stab_kwargs or {})
         if lambda_star is not None and "lambda_star" not in self.fmm_stab_kwargs:
             self.fmm_stab_kwargs["lambda_star"] = float(lambda_star)
+        self.fmm_refine            = fmm_refine
         self.n_jobs                = n_jobs
         self.verbose               = verbose
 
@@ -952,7 +959,7 @@ class TopGeneSelector:
         if self.fmm_method == "stabilized":
             self._log(f"  Preparando FMM estabilizado (calibracion lambda)...")
             prepared = prepare_dataset(circ, **self.fmm_stab_kwargs)
-            stab_model = StabilizedFMMModel(prepared=prepared)
+            stab_model = StabilizedFMMModel(prepared=prepared, refine=self.fmm_refine)
             self._cached_stab_model = stab_model        # reutilizable para seeds forzados
             self._log(f"  lambda* = {prepared.lambda_star:.4f}")
 
