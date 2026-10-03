@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.nbi
+*.nbc
+.pytest_cache/
+.venv/
+*.egg-info/
+python/resultados/

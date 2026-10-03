@@ -1,7 +1,25 @@
 # CIRCUST
 CIRCular robUST statistical methodology to analyse human molecular rhythms from post-mortem samples.
 
-# How to use 
+# Implementations
+CIRCUST is available in two versions:
+
+| Version | Location | Entry point |
+|---|---|---|
+| R (original) | repository root | `runCIRCUST.R` |
+| Python | [`python/`](python/) | `python/scripts/run_circust.py` |
+
+Both follow the same four steps. See [`python/README.md`](python/README.md) for installation and usage of the Python version; the rest of this file describes the R version.
+
+## Quick start (Python)
+```bash
+cd python
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt        # or: pip install -e .[accel]
+python scripts/run_circust.py --data data/matrixIn_mini.parquet -o resultados
+```
+
+# How to use (R)
 CIRCUST is achieved in R and is easy to use. 
 The code provided in this GitHub replicated the four steps described in CIRCUST paper (https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011510).
 
