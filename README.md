@@ -1,7 +1,7 @@
 # CIRCUST
 CIRCular robUST statistical methodology to analyse human molecular rhythms from post-mortem samples.
 
-## Python implementation
+# Python implementation
 
 A new Python implementation of CIRCUST is available in the [python/](https://github.com/yolandalago/CIRCUST/tree/main/python) directory.
 
@@ -11,7 +11,7 @@ The original R implementation remains available in the root directory of this re
 
 **[Python implementation — installation and documentation](https://github.com/yolandalago/CIRCUST/blob/main/python/README.md)**
 
-# How to use 
+# How to use (R implementation)
 CIRCUST is achieved in R and is easy to use. 
 The code provided in this GitHub replicated the four steps described in CIRCUST paper (https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011510).
 
