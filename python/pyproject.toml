@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circust"
+version = "0.1.0"
+description = "CIRCUST (Larriba et al., 2023) en Python"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "joblib>=1.2", "pyarrow>=12.0"]
+
+[project.optional-dependencies]
+accel = ["numba>=0.59"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["circust*"]

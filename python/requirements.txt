@@ -1,0 +1,9 @@
+# Dependencias de CIRCUST. Python >= 3.10.
+#     pip install -r requirements.txt
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+joblib>=1.2
+pyarrow>=12.0
+# Acelera el ajuste FMM. Sin Numba los resultados son los mismos pero mas lentos.
+numba>=0.59
