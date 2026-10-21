@@ -3,11 +3,11 @@ CIRCular robUST statistical methodology to analyse human molecular rhythms from 
 
 # Python implementation
 
-A new Python implementation of CIRCUST is available in the [python/](https://github.com/yolandalago/CIRCUST/tree/main/python) directory. This implementation in collaboration with Samuel Ortega Bustos.
+A new Python implementation of CIRCUST, developed in collaboration with Samuel Ortega Bustos, is available in the [python/](https://github.com/yolandalago/CIRCUST/tree/main/python) directory. 
 
 This implementation provides a modular workflow covering preprocessing, preliminary circadian ordering, TOP gene selection, robust ordering, and FMM-based estimation. It also includes computational improvements, parallel processing, and detailed installation and usage instructions.
 
-The original R implementation remains available in the root directory of this repository.
+The original R implementation remains available in the root directory of this repository (see the README below).
 
 **[Python implementation — installation and documentation](https://github.com/yolandalago/CIRCUST/blob/main/python/README.md)**
 
