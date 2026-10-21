@@ -2,7 +2,7 @@
 
 Python implementation of CIRCUST for reconstructing circadian sample orderings from gene expression matrices.
 
-This implementation was developed in collaboration with **Samuel Ortega Bustos**.
+This implementation was developed in collaboration with Samuel Ortega Bustos.
 
 ## 1. Repository Structure
 
