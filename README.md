@@ -3,7 +3,7 @@ CIRCular robUST statistical methodology to analyse human molecular rhythms from 
 
 # Python implementation
 
-A new Python implementation of CIRCUST is available in the [python/](https://github.com/yolandalago/CIRCUST/tree/main/python) directory.
+A new Python implementation of CIRCUST is available in the [python/](https://github.com/yolandalago/CIRCUST/tree/main/python) directory. This implementation in collaboration with Samuel Ortega Bustos.
 
 This implementation provides a modular workflow covering preprocessing, preliminary circadian ordering, TOP gene selection, robust ordering, and FMM-based estimation. It also includes computational improvements, parallel processing, and detailed installation and usage instructions.
 
@@ -15,7 +15,7 @@ The original R implementation remains available in the root directory of this re
 CIRCUST is achieved in R and is easy to use. 
 The code provided in this GitHub replicated the four steps described in CIRCUST paper (https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1011510).
 
-Run the R script named runCIRCURST.R to ,conduct the methodology.
+Run the R script named runCIRCURST.R to conduct the methodology.
 The file matrixIn.RData is loaded on the R script and serves as example of unorderd post-mortem gene expression matrix.
 matrixIn: gene expression matrix of size 56200X479 (genes X unordered samples/individuals) at a given tissue. Note that it is a real example, so it requires a reasonable amount of computational time.
 
