@@ -5,6 +5,16 @@ Vuelca un CSV largo, una fila por celda, replica y metodo de resumen. Es
 reanudable: relee lo ya escrito y salta esas filas, asi que se puede
 interrumpir y continuar sin perder trabajo.
 
+Junto al CSV guarda las salidas del pipeline de cada grupo y metodo
+(``simulation/salidas.py``), para poder recalcular o anadir medidas sin
+volver a ejecutar nada.
+
+Las K repeticiones de la Etapa 4 no dependen del metodo de resumen, asi que se
+calculan una vez por grupo y se resumen con cada metodo. ``t_reps_s`` es su
+coste, el punto en que termina la Etapa 4 del CIRCUST original, y
+``t_resumen_s`` el del resumen y el atlas de cada metodo. ``t_robust_s`` es la
+suma, lo que costaria la Etapa 4 de ese metodo ejecutada sola.
+
 Uso
 ---
     python -m simulation.run --bloque sin_ruido --reps 3
@@ -28,8 +38,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from simulation.atlas import COLUMNAS_ATLAS, atlas_metrics
 from simulation.generate import generate_dataset
 from simulation.grid import BLOQUES, Cell, build_grid
-from simulation.metrics import evaluate
-from simulation.runner import RobustConfig, run_stage_4, run_stages_0_3
+from simulation.metrics import ajuste_fmm, cre, evaluate, genes_ritmicos
+from simulation.runner import (
+    RobustConfig, run_stage_4, run_stage_4_repetitions, run_stages_0_3,
+)
+from simulation.salidas import Salidas, grupo_id, salidas_grupo, salidas_metodo
 from simulation.truth import SimConfig
 
 COLUMNAS: list[str] = [
@@ -47,16 +60,18 @@ COLUMNAS: list[str] = [
     "error_fase_medio_h", "error_fase_h", "rho_circ", "rho_fl", "tau",
     "p1", "p2", "p4",
     # metricas invariantes al marco, es el diagnostico
-    "tau_circular", "acierto_sentido", "error_orden_h",
+    "tau_circular", "error_orden_h", "cre",
     # observables sin la verdad, para calibrar el aviso de fase absoluta
     "r2_anchor", "pares_ok", "evidencia", "desacuerdo_K",
     "n_top", "n_outliers", "n_evaluadas", "direction_flips",
-    # calidad del atlas: es lo que separa el FMM base del estabilizado, que
+    # que eligio el metodo: la repeticion (best_k) o el MSCE del consenso
+    "rep_elegida", "msce",
+    # calidad del atlas: es lo que separa el FMM base de CircaFMM, que
     # sobre el orden de muestras son identicos por construccion
     *COLUMNAS_ATLAS,
     # tiempos
-    "t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s", "t_robust_s",
-    "t_total_s",
+    "t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s",
+    "t_reps_s", "t_resumen_s", "t_robust_s", "t_total_s",
 ]
 
 # Filas que se acumulan antes de escribir. Un bloque tarda horas, asi que el
@@ -65,7 +80,40 @@ COLUMNAS: list[str] = [
 LOTE_ESCRITURA = 50
 
 _METRICAS = ("error_fase_medio_h", "error_fase_h", "rho_circ", "rho_fl", "tau", "tau_circular",
-             "acierto_sentido", "p1", "p2", "p4", "error_orden_h")
+             "p1", "p2", "p4", "error_orden_h", "cre")
+
+
+class _ReferenciaCRE:
+    """
+    Ajustes FMM de referencia del CRE, con los tiempos verdaderos.
+
+    Las Etapas 0 a 3 son comunes a todos los metodos de un grupo, asi que la
+    referencia se ajusta una sola vez y la comparten. Se guarda por conjunto
+    de muestras evaluadas por si algun metodo devolviera menos.
+
+    El ajustador es el modelo FMM del grupo, y con CircaFMM la ``lambda_star``
+    que calibro el pipeline, igual para la referencia y para las estimadas.
+    """
+
+    def __init__(self, expr: pd.DataFrame, truth, fmm_method: str = "base",
+                 lambda_star: float | None = None) -> None:
+        self.expr  = expr.loc[genes_ritmicos(truth.gene_params, expr.index)]
+        self.truth = truth
+        self.modelo = dict(fmm_method=fmm_method, lambda_star=lambda_star)
+        self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+
+    def cre(self, theta_hat: pd.Series) -> float:
+        if self.expr.empty:
+            return float("nan")
+        nombres = tuple(sorted(theta_hat.index))
+        if nombres not in self._cache:
+            Y = self.expr[list(nombres)].to_numpy()
+            self._cache[nombres] = (
+                Y, ajuste_fmm(Y, self.truth.theta_for(list(nombres)), **self.modelo),
+            )
+        Y, referencia = self._cache[nombres]
+        return cre(referencia, ajuste_fmm(Y, theta_hat.loc[list(nombres)].to_numpy(),
+                                          **self.modelo))
 
 
 def _fila_base(
@@ -110,35 +158,55 @@ def run_cell_group(
     metodos:    list[RobustConfig],
     bloque:     str,
     rep:        int,
-) -> list[dict]:
+) -> tuple[list[dict], Salidas]:
     """
-    Genera una matriz, corre las Etapas 0 a 3 una vez y la Etapa 4 por metodo.
+    Genera una matriz, corre las Etapas 0 a 3 y las K repeticiones una vez, y
+    el resumen de la Etapa 4 por metodo.
 
-    Devuelve una fila por metodo. Un fallo no interrumpe nada: se registra en
-    la fila con ``status='fallo'`` porque la tasa de fallo por celda es un
-    resultado del estudio y no algo que esconder.
+    Devuelve una fila por metodo y las salidas del grupo. Un fallo no
+    interrumpe nada: se registra en la fila con ``status='fallo'`` porque la
+    tasa de fallo por celda es un resultado del estudio y no algo que
+    esconder.
     """
     t0 = time.perf_counter()
     filas = [
         _fila_base(bloque, cfg, n_core, fmm_method, m, rep) for m in metodos
     ]
+    gid = grupo_id(bloque, cfg, n_core, fmm_method, rep)
+    salidas = Salidas()
+    if len({(m.n_reps, m.seed) for m in metodos}) > 1:
+        raise ValueError(
+            "Los metodos de un grupo comparten las K repeticiones, asi que "
+            "tienen que tener el mismo n_reps y la misma semilla"
+        )
 
     try:
         matriz, truth = generate_dataset(cfg)
         estado = run_stages_0_3(matriz, truth, n_core, fmm_method)
+        t = time.perf_counter()
+        reps = run_stage_4_repetitions(estado, truth, fmm_method, metodos[0])
+        t_reps = time.perf_counter() - t
+        salidas.unir(salidas_grupo(gid, estado, reps, t_reps))
     except Exception as exc:                      # noqa: BLE001
         for fila in filas:
             fila["status"] = "fallo"
             fila["error"] = f"{type(exc).__name__}: {exc}"
             fila["t_total_s"] = time.perf_counter() - t0
-        return filas
+        return filas, salidas
 
     tiempos = estado.timing
+    referencia_cre = _ReferenciaCRE(estado.expr_full_norm, truth,
+                                    fmm_method, estado.lambda_star)
     for fila, metodo in zip(filas, metodos):
         t_metodo = time.perf_counter()
+        theta_hat = None
         try:
-            etapa4     = run_stage_4(estado, truth, metodo, fmm_method)
+            etapa4     = run_stage_4(estado, truth, metodo, fmm_method, reps=reps)
+            t_resumen  = time.perf_counter() - t_metodo
+            salidas.unir(salidas_metodo(fila["row_id"], gid, etapa4))
             theta_hat  = etapa4.theta_hat
+            fila["rep_elegida"] = etapa4.selected_rep
+            fila["msce"]        = etapa4.msce
             theta_true = truth.theta_for(list(theta_hat.index))
             fila.update(evaluate(theta_true, theta_hat.values))
             fila["n_evaluadas"]     = len(theta_hat)
@@ -151,6 +219,8 @@ def run_cell_group(
         except Exception as exc:                  # noqa: BLE001
             fila["status"] = "fallo"
             fila["error"] = f"{type(exc).__name__}: {exc}"
+            theta_hat = None
+            t_resumen = time.perf_counter() - t_metodo
             for clave in (*_METRICAS, *COLUMNAS_ATLAS):
                 fila[clave] = np.nan
         fila["n_top"]          = estado.n_top
@@ -162,11 +232,21 @@ def run_cell_group(
         fila["t_cpca_s"]       = tiempos.get("cpca", np.nan)
         fila["t_sync_s"]       = tiempos.get("preliminary_order", np.nan)
         fila["t_top_s"]        = tiempos.get("top_genes", np.nan)
-        fila["t_robust_s"]     = time.perf_counter() - t_metodo
+        fila["t_reps_s"]       = t_reps
+        fila["t_resumen_s"]    = t_resumen
+        fila["t_robust_s"]     = t_reps + t_resumen
         fila["t_total_s"]      = (
             sum(v for v in tiempos.values()) + fila["t_robust_s"]
         )
-    return filas
+        # Despues de cronometrar: el CRE ajusta un FMM por gen ritmico y es
+        # coste de la evaluacion, no del metodo. Un fallo aqui no invalida la
+        # fila, solo deja el CRE vacio.
+        if theta_hat is not None:
+            try:
+                fila["cre"] = referencia_cre.cre(theta_hat)
+            except Exception as exc:              # noqa: BLE001
+                fila["error"] = f"cre: {type(exc).__name__}: {exc}"
+    return filas, salidas
 
 
 def existing_ids(path: Path) -> set[str]:
@@ -182,7 +262,7 @@ def _agrupar(celdas: list[Cell]) -> list[tuple]:
     """
     Agrupa las celdas que comparten matriz y Etapas 0 a 3.
 
-    Es lo que hace barato el bloque de agregacion: las cinco variantes de
+    Es lo que hace barato el bloque de agregacion: las seis variantes de
     ``robust_method`` de una misma celda se resuelven con un solo pipeline
     hasta la Etapa 3.
     """
@@ -200,8 +280,8 @@ def main() -> None:
     parser.add_argument("--bloque", required=True, choices=list(BLOQUES))
     parser.add_argument("--reps", type=int, default=20,
                         help="Replicas por celda. Por defecto: 20.")
-    parser.add_argument("--out", type=str, default="output/simulacion",
-                        help="Directorio de salida. Por defecto: output/simulacion")
+    parser.add_argument("--out", type=str, default="output/simulacion_2026-10",
+                        help="Directorio de salida. Por defecto: output/simulacion_2026-10")
     parser.add_argument("--jobs", type=int, default=-1,
                         help="Procesos en paralelo a nivel de celda. Por defecto: todos.")
     parser.add_argument("--limit", type=int, default=None,
@@ -239,16 +319,22 @@ def main() -> None:
     n_filas = n_fallos = 0
     cpu = 0.0
     lote: list[dict] = []
+    salidas_lote = Salidas()
 
     def volcar() -> None:
         nonlocal lote
         if not lote:
             return
+        # Primero las salidas y despues el CSV, que es el registro con el que
+        # se reanuda: si se corta entre los dos, el grupo se repite y
+        # ``salidas.leer`` descarta la copia vieja.
+        salidas_lote.escribir(salida)
         df = pd.DataFrame(lote, columns=COLUMNAS)
         df.to_csv(destino, mode="a", header=not destino.exists(), index=False)
         lote = []
 
-    for grupo in resultados:
+    for grupo, salidas_grupo_ in resultados:
+        salidas_lote.unir(salidas_grupo_)
         lote.extend(grupo)
         n_filas += len(grupo)
         n_fallos += sum(1 for f in grupo if f["status"] == "fallo")

@@ -15,14 +15,14 @@ Pipeline en dos fases:
          b) Sincronizacion biologica (rotacion + orientacion).
          c) Re-ajuste FMM a cada gen del TOP para obtener
             la tabla de estadisticos de 12 columnas.
-      3. Calcula la mediana R² (FMM) por repeticion sobre genes de evaluacion.
+      3. Calcula la mediana R² (FMM) por repeticion sobre los genes TOP.
 
   **Fase B — Tarea 1: eleccion del orden robusto** (segun ``method``):
       - ``"best_k"``: elige UNA de las K repeticiones segun el criterio de
         seleccion indicado en ``selection_criterion``:
           * ``"r2_median"``   (default): maximiza la mediana de R² (FMM) sobre
-            los genes de evaluacion.
-          * ``"n_well_fitted"``: maximiza el numero de genes de evaluacion con
+            los genes TOP.
+          * ``"n_well_fitted"``: maximiza el numero de genes TOP con
             R² >= ``selection_r2_threshold``.
           * ``"medoid"``: minimiza la distancia coseno media al resto de las K
             ordenaciones (orden mas representativo).
@@ -30,8 +30,10 @@ Pipeline en dos fases:
         extra del ORDEN, un consenso por media circular de las K ordenaciones
         (opcion A) y se contrasta frente al orden preliminar CPCA mediante
         correlacion circular.
-      - ``"aggregate"``: agregacion circular de los K ordenes (Barragan et al.,
-        2015) usando el modulo ``circular_aggregation``. Por defecto TSP3.
+      - ``"aggregate"``: consenso de las K repeticiones con el modulo
+        ``circular_aggregation``. Por defecto media circular ponderada de las K
+        fases. Tambien agregacion de ordenes por TSP y Hodge (Barragan et al.,
+        2015).
 
 Posicion en el pipeline
 -----------------------
@@ -47,14 +49,14 @@ from dataclasses import dataclass, field
 from math import pi
 
 from circust.circular_aggregation import (
-    aggregate_circular_orders, circular_isotonic_regression,
+    AGGREGATION_METHODS, HODGE_VARIANTS, _check_tsp_alpha, aggregate_circular_orders,
 )
 from circust.cpca                 import CPCA
 from circust.fitting.fmm          import FMMModel
-from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
+from circust.fitting.circafmm import CircaFMMModel, prepare_dataset
 from circust.synchronizer        import CircularSynchronizer, DEFAULT_CONSISTENCY_PAIRS
 # top_genes solo depende de circust.fitting, asi que no hay ciclo.
-from circust.top_genes           import circular_median
+from circust.top_genes           import _fit_fmm_one, _fit_fmm_one_circafmm
 
 
 # ===========================================================================
@@ -72,13 +74,13 @@ def _fit_gene(args):
     Funcion a nivel de modulo para serializacion por ``ProcessPoolExecutor``.
     El segundo elemento de ``args`` puede ser:
       - dict de kwargs para ``FMMModel`` (camino "base")
-      - un ``StabilizedFMMModel`` ya preparado (camino "stabilized");
+      - un ``CircaFMMModel`` ya preparado (camino "circafmm");
         en ese caso se reusa directamente sin construir nada.
     """
     (i, gene, vvv, esc_k, fmm_obj, arntl_peak_raw,
      orientation_changed, order_rot, n_samp) = args
 
-    if isinstance(fmm_obj, StabilizedFMMModel):
+    if isinstance(fmm_obj, CircaFMMModel):
         fmm_loc = fmm_obj                         # reusa modelo compartido
     else:
         fmm_loc = FMMModel(**fmm_obj)             # base, construye por gen
@@ -275,22 +277,41 @@ def _circular_mean_consensus(
 # ===========================================================================
 
 @dataclass
+class RobustRepetitions:
+    """Las K repeticiones de la Etapa 4, antes de resumirlas (fases A.1 a A.2b).
+
+    Es lo que produce el CIRCUST original en esta etapa: K ordenes
+    sincronizados y el ajuste FMM de cada gen TOP en cada uno. No depende de
+    ``method``, ``selection_criterion`` ni ``aggregation_method``, solo de la
+    semilla, asi que un mismo objeto puede resumirse con cualquiera de ellos
+    (:meth:`RobustOrderEstimator.summarize`).
+    """
+
+    names_top:     list
+    n_samp:        int
+    theta_pre:     np.ndarray
+    sample_orders: np.ndarray
+    circ_scales:   np.ndarray
+    flipped:       np.ndarray
+    stats_table:   np.ndarray
+    per_rep_fmm:   list
+    sel_names:     np.ndarray
+
+
+@dataclass
 class RobustOrderResult:
     """Salida de :class:`RobustOrderEstimator`.
 
     Atributos -- orden final
     ------------------------
     sample_order : np.ndarray int, shape (n_muestras,)
-        Orden de muestras final (best_k o agregacion). **Vacio con
-        ``method="median"``**: CIRCUST original no define ningun orden de
-        muestras consenso, calcula K y los descarta tras ajustar. Comprueba
-        ``sample_order.size`` antes de consumirlo.
+        Orden de muestras final (best_k o agregacion).
     circular_scale : np.ndarray, shape (n_muestras,)
-        Escala circular del orden final. Vacio con ``method="median"``.
+        Escala circular del orden final.
     method_used : str
-        ``"median"``, ``"best_k"`` o ``"aggregate"``.
+        ``"best_k"`` o ``"aggregate"``.
     aggregation_method : str | None
-        Metodo de agregacion ganador (``"tsp3"`` / ``"hods"``) si
+        Metodo de agregacion (``"circmean"`` / ``"tsp"`` / ``"hod"``) si
         method=aggregate, None si best_k.
     selected_rep : int | None
         Indice (0-based) de la repeticion seleccionada (solo en best_k).
@@ -344,14 +365,15 @@ class RobustOrderResult:
     # SELECCIONADA (sel_rep), consistentes con el orden que se devuelve.
     # Columnas: gene_name, M, amplitude, alpha, beta, omega, peak_phase_rad,
     # trough_phase_rad, r2_fmm. Solo se rellena con method="best_k" (en aggregate
-    # el atlas se re-ajusta sobre el orden consenso, ver _build_atlas).
+    # el atlas se re-ajusta sobre el orden consenso, ver build_atlas).
     selected_fmm:    "pd.DataFrame" = field(default_factory=pd.DataFrame)
 
     # ── Opcion A: consenso del ORDEN por media circular (solo best_k) ──────
     # Agregacion de las K ordenaciones por media circular de las fases por
-    # muestra, alineadas (Procrustes circular) al orden preliminar. Es la
-    # estimacion robusta del ORDEN de muestras por agregacion de las K
-    # ordenaciones. Solo se rellena con method="best_k".
+    # muestra. No se alinean antes: la sincronizacion ya les fija un origen
+    # comun y _fix_orientations un sentido comun. Es una salida extra, no
+    # cambia sample_order, circular_scale ni selected_fmm. Solo se rellena con
+    # method="best_k".
     #   circmean_order     : permutacion consenso (indices originales)
     #   circmean_scale     : fases del consenso, en el orden de circmean_order
     #   circmean_resultant : R_i in [0,1] por muestra (confianza), mismo orden
@@ -359,9 +381,9 @@ class RobustOrderResult:
     circmean_scale:     np.ndarray | None = None
     circmean_resultant: np.ndarray | None = None
     # Contraste frente al orden preliminar CPCA: correlacion circular de
-    # Jammalamadaka. Se incluye tambien best_k vs preliminar para comparar si
-    # la agregacion (opcion A) se acerca mas o menos al preliminar que la
-    # repeticion unica elegida.
+    # Fisher y Lee (ver _fisher_lee). Se incluye tambien best_k vs preliminar
+    # para comparar si la agregacion (opcion A) se acerca mas o menos al
+    # preliminar que la repeticion unica elegida.
     circmean_vs_prelim_corr:  float | None = None
     bestk_vs_prelim_corr:     float | None = None
 
@@ -420,39 +442,50 @@ class RobustOrderEstimator:
     selection_criterion : str
         Solo si method=best_k. Criterio de calidad con el que se elige la
         repeticion:
-        - ``"r2_median"`` (default): mediana de R² (FMM) sobre los genes de
-          evaluacion, maxima.
-        - ``"n_well_fitted"``: numero de genes de evaluacion con
+        - ``"r2_median"`` (default): mediana de R² (FMM) sobre los genes TOP,
+          maxima.
+        - ``"n_well_fitted"``: numero de genes TOP con
           R² >= ``selection_r2_threshold``, maximo. Ante empate se desempata
           por mediana de R².
         - ``"medoid"``: distancia coseno media al resto de ordenaciones,
           minima (orden mas representativo del conjunto).
     selection_r2_threshold : float
-        Umbral tau del criterio ``"n_well_fitted"``. Valor PROVISIONAL 0.65,
-        pendiente de calibrar en el estudio de simulacion. No usar 0.5: es el
-        mismo umbral con el que se filtra la ritmicidad al construir el
-        conjunto TOP, de modo que sobre ese conjunto el criterio satura por
-        construccion (97-100 % de genes lo superan en todas las reps).
+        Umbral tau del criterio ``"n_well_fitted"``: un gen cuenta como bien
+        ajustado si su R² (FMM) >= tau. Es un parametro del usuario, no un
+        valor calibrado: define cuan exigente se quiere ser con el ajuste y
+        puede ajustarse a cada estudio. Por defecto 0.5, el umbral de R² que
+        usaba la implementacion original en R.
 
-        TODO(tau): cuando las simulaciones fijen el valor definitivo hay que
-        actualizarlo aqui, en el default de ``--selection-r2-threshold`` de
-        scripts/run_pipeline.py y en docs/main.tex (subseccion "Criterios de
-        seleccion", donde hay un bloque de comentario PENDIENTE con el
-        detalle de lo que falta escribir).
+        Conviene tener presente que 0.5 es tambien el umbral con el que se
+        filtra la ritmicidad al construir el conjunto TOP, de modo que sobre
+        ese conjunto casi todos los genes lo superan en todas las
+        repeticiones (97-100 % en una prueba preliminar) y el criterio
+        apenas discrimina. Si eso ocurre, los empates se resuelven por la
+        mediana de R², y subir tau (en una prueba preliminar el criterio
+        discriminaba entre 0.60 y 0.80 y colapsaba hacia 0.90, con ningun gen
+        por encima) lo hace efectivo.
     aggregation_method : str
-        Solo si method=aggregate. ``"auto"`` (default; corre TSP3 y HODs y se
-        queda con el de menor MSCE), ``"tsp3"`` o ``"hods"``.
-    consensus_scale_mode : str
-        Solo si method=aggregate. Como se construye la escala circular asociada
-        al orden consenso.
+        Solo si method=aggregate. Como se combinan las K repeticiones:
 
-        - ``"circmean"`` (default): media circular por muestra de las K fases.
-          Es el mejor estimador de la fase, pero no garantiza que
-          ``argsort(circular_scale)`` reproduzca ``sample_order``.
-        - ``"cire"``: proyeccion isotonica circular de esa media sobre el orden
-          consenso. Verifica ``phi_{o_1} <= ... <= phi_{o_n}`` por construccion,
-          como pide el anexo, pero agrupa muestras en bloques y en simulacion
-          multiplica por 2 a 5 el error mediano de fase.
+        - ``"circmean"`` (default): la fase de cada muestra es la media circular
+          ponderada por kappa de sus K fases, y el orden es el que inducen.
+        - ``"tsp"``: orden de consenso por TSP (Barragan et al.), con
+          ``tsp_alpha``. ``"tsp3"`` se acepta como sinonimo.
+        - ``"hod"``: orden de consenso por Hodge (Barragan et al.), con
+          ``hodge_variant``. ``"hods"`` se acepta como sinonimo.
+
+        Con ``"tsp"`` y ``"hod"`` las fases son el CIRE de la media circular
+        ponderado por la longitud resultante de cada muestra, la maxima
+        verosimilitud bajo ese orden. Ver ``aggregate_circular_orders``.
+    hodge_variant : str
+        Solo si aggregation_method="hod". Flujo triplewise del metodo de Hodge
+        (Tabla 2 de Barragan et al.): ``"s"`` (HODs, default, diferencias de
+        fase), ``"p"`` (posiciones), ``"b"`` (solo el sentido de cada
+        triplete) o ``"r"`` (longitud resultante del triplete).
+    tsp_alpha : float
+        Solo si aggregation_method="tsp". Penalizacion ``alpha >= 1`` de los
+        costes del TSP (ecuacion (7) de Barragan et al.), que fija la variante
+        TSPalpha. Por defecto 3, TSP3, la que recomienda el paper.
     anchor_gene, direction_gene : str
         Genes ancla para sincronizacion.
     consistency_pairs : list[tuple[str, str]] | None
@@ -461,17 +494,17 @@ class RobustOrderEstimator:
     fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps : int
         Hiperparametros FMM base.
     fmm_method : str
-        ``"base"`` (FMMModel) o ``"stabilized"`` (StabilizedFMMModel).
-    fmm_stab_kwargs : dict | None
-        Kwargs adicionales para ``prepare_dataset`` cuando stab.
+        ``"base"`` (FMMModel) o ``"circafmm"`` (CircaFMMModel).
+    circafmm_kwargs : dict | None
+        Kwargs adicionales para ``prepare_dataset`` con CircaFMM.
     lambda_star : float | None
-        Lambda heredado de CPCA (modo stab) — evita recalibrar.
+        Lambda heredado de CPCA (modo CircaFMM) — evita recalibrar.
     fmm_refine : bool
-        Refinamiento local opcional de ``(alpha, omega)`` del FMM estabilizado
+        Refinamiento local opcional de ``(alpha, omega)`` de CircaFMM
         (Seccion S3.4.4 del suplemento de CircaFMM) en los ajustes de cada
         repeticion. Por defecto False. Se ignora con ``fmm_method="base"``.
     recalibrate_lambda_per_rep : bool
-        Si True, recalibra lambda del FMM estabilizado en cada una de las K
+        Si True, recalibra lambda de CircaFMM en cada una de las K
         repeticiones. Si False (default), reusa el ``lambda_star`` heredado
         del CPCA.
 
@@ -490,8 +523,8 @@ class RobustOrderEstimator:
         es incorrecto con los tres valores.
 
         **Cuesta.** Cada calibracion son 27 s y se hacian seis por celda, una
-        en el CPCA y una por repeticion: el 99 % del sobrecoste del FMM
-        estabilizado. Perfilado de la Etapa 4: 132,7 s de 135,7 s en
+        en el CPCA y una por repeticion: el 99 % del sobrecoste de
+        CircaFMM. Perfilado de la Etapa 4: 132,7 s de 135,7 s en
         prepare_dataset, con 600 llamadas a _simulate_spikes_vectorized.
     n_jobs : int
         Workers para ajuste paralelo de genes (-1 = todos).
@@ -507,9 +540,10 @@ class RobustOrderEstimator:
         sample_size_fraction:  float = 2.0 / 3.0,
         method:                str   = "aggregate",
         selection_criterion:   str   = "r2_median",
-        selection_r2_threshold: float = 0.65,
-        aggregation_method:    str   = "auto",
-        consensus_scale_mode:  str   = "circmean",
+        selection_r2_threshold: float = 0.5,
+        aggregation_method:    str   = "circmean",
+        tsp_alpha:             float = 3.0,
+        hodge_variant:         str   = "s",
         anchor_gene:           str   = "ARNTL",
         direction_gene:        str   = "DBP",
         consistency_pairs:     list[tuple[str, str]] | None = None,
@@ -517,7 +551,7 @@ class RobustOrderEstimator:
         fmm_length_omega_grid: int   = 24,
         fmm_num_reps:          int   = 3,
         fmm_method:            str   = "base",
-        fmm_stab_kwargs:       dict|None  = None,
+        circafmm_kwargs:       dict|None  = None,
         lambda_star:           float|None = None,
         recalibrate_lambda_per_rep: bool   = False,
         fmm_refine:            bool  = False,
@@ -525,9 +559,9 @@ class RobustOrderEstimator:
         seed:                  int|None   = None,
         verbose:               bool  = True,
     ) -> None:
-        if method not in ("median", "best_k", "aggregate"):
+        if method not in ("best_k", "aggregate"):
             raise ValueError(
-                "method debe ser 'median', 'best_k' o 'aggregate', "
+                "method debe ser 'best_k' o 'aggregate', "
                 f"recibido: {method!r}"
             )
         if selection_criterion not in ("r2_median", "n_well_fitted", "medoid"):
@@ -535,15 +569,17 @@ class RobustOrderEstimator:
                 "selection_criterion debe ser 'r2_median', 'n_well_fitted' o "
                 f"'medoid', recibido: {selection_criterion!r}"
             )
-        if aggregation_method not in ("auto", "tsp3", "hods"):
-            raise ValueError(f"aggregation_method debe ser 'auto', 'tsp3' o 'hods', recibido: {aggregation_method!r}")
-        if consensus_scale_mode not in ("circmean", "cire"):
+        aggregation_method = {"tsp3": "tsp", "hods": "hod"}.get(aggregation_method, aggregation_method)
+        if aggregation_method not in AGGREGATION_METHODS:
             raise ValueError(
-                "consensus_scale_mode debe ser 'circmean' o 'cire', "
-                f"recibido: {consensus_scale_mode!r}"
+                f"aggregation_method debe ser uno de {AGGREGATION_METHODS}, "
+                f"recibido: {aggregation_method!r}"
             )
-        if fmm_method not in ("base", "stabilized"):
-            raise ValueError(f"fmm_method debe ser 'base' o 'stabilized', recibido: {fmm_method!r}")
+        tsp_alpha = _check_tsp_alpha(tsp_alpha)
+        if hodge_variant not in HODGE_VARIANTS:
+            raise ValueError(f"hodge_variant debe ser uno de {HODGE_VARIANTS}, recibido: {hodge_variant!r}")
+        if fmm_method not in ("base", "circafmm"):
+            raise ValueError(f"fmm_method debe ser 'base' o 'circafmm', recibido: {fmm_method!r}")
 
         self.n_reps               = n_reps
         self.sample_size_fraction = sample_size_fraction
@@ -551,7 +587,8 @@ class RobustOrderEstimator:
         self.selection_criterion  = selection_criterion
         self.selection_r2_threshold = selection_r2_threshold
         self.aggregation_method   = aggregation_method
-        self.consensus_scale_mode = consensus_scale_mode
+        self.tsp_alpha            = tsp_alpha
+        self.hodge_variant        = hodge_variant
         self.anchor_gene          = anchor_gene
         self.direction_gene       = direction_gene
         self.consistency_pairs    = consistency_pairs
@@ -561,7 +598,7 @@ class RobustOrderEstimator:
             num_reps=fmm_num_reps,
         )
         self.fmm_method      = fmm_method
-        self.fmm_stab_kwargs = dict(fmm_stab_kwargs or {})
+        self.circafmm_kwargs = dict(circafmm_kwargs or {})
         self.lambda_star_inherited      = lambda_star
         self.recalibrate_lambda_per_rep = recalibrate_lambda_per_rep
         self.fmm_refine = fmm_refine
@@ -579,7 +616,6 @@ class RobustOrderEstimator:
         theta_pre:      np.ndarray,
         expr_full_norm: pd.DataFrame,
         core_genes:     list[str],
-        eval_genes:     list[str] | None = None,
     ) -> RobustOrderResult:
         """Ejecuta la estimacion robusta completa.
 
@@ -597,31 +633,40 @@ class RobustOrderEstimator:
             aqui se extraen las filas de cada submuestra para su CPCA.
         core_genes : list[str]
             Genes reloj centrales, usados para sincronizar cada repeticion.
-        eval_genes : list[str] | None
-            Genes sobre los que se evaluan los criterios de seleccion.
-            Default: el conjunto TOP completo.
+
+        Los criterios de seleccion se evaluan sobre el conjunto TOP completo
+        y no sobre los genes core: con ~12 genes core la mediana de R² es muy
+        inestable y el conteo de genes bien ajustados satura (12/12 en casi
+        todas las reps), mientras que sobre el TOP ambos criterios discriminan.
+        """
+        return self.summarize(self.run_repetitions(
+            top_matrix, theta_pre, expr_full_norm, core_genes,
+        ))
+
+    def run_repetitions(
+        self,
+        top_matrix:     pd.DataFrame,
+        theta_pre:      np.ndarray,
+        expr_full_norm: pd.DataFrame,
+        core_genes:     list[str],
+    ) -> RobustRepetitions:
+        """Fases A.1 a A.2b: las K repeticiones sincronizadas y sus ajustes.
+
+        Es el punto en el que termina la Etapa 4 del CIRCUST original, que no
+        colapsa las K repeticiones en un orden. Los argumentos son los de
+        :meth:`run`.
         """
         self._log("=== Etapa 4: Estimacion de Orden Robusto ===")
         self._log(f"  Metodo: {self.method}  |  K={self.n_reps}  |  "
                   f"fraccion={self.sample_size_fraction:.2f}")
         if self.method == "aggregate":
-            self._log(f"  Agregacion: {self.aggregation_method}")
+            self._log(f"  Agregacion: {self.aggregation_method} "
+                      f"(tsp_alpha={self.tsp_alpha:g}, "
+                      f"hodge_variant={self.hodge_variant})")
 
         names_top  = list(top_matrix.index)
         n_top      = len(names_top)
         n_samp     = top_matrix.shape[1]
-
-        # Conjunto de evaluacion de los criterios de seleccion. Por defecto el
-        # conjunto TOP completo y no los genes core: con ~12 genes core la
-        # mediana de R² es muy inestable y el conteo de genes bien ajustados
-        # satura (12/12 en casi todas las reps), mientras que sobre el TOP
-        # ambos criterios discriminan. Ninguno de los dos conjuntos es
-        # independiente del procedimiento (el TOP se selecciona con el orden
-        # preliminar, que a su vez sale de los core), de modo que la eleccion
-        # se hace por potencia estadistica.
-        if eval_genes is None:
-            eval_genes = list(names_top)
-        self._log(f"  Genes de evaluacion: {len(eval_genes)}")
 
         # ── Fase A.1: Seleccion aleatoria ───────────────────────────────
         rng, tam = self._random_selection(names_top)
@@ -643,53 +688,47 @@ class RobustOrderEstimator:
                 theta_pre = theta_pre,
                 n_samp    = n_samp,
             )
+        return RobustRepetitions(
+            names_top     = names_top,
+            n_samp        = n_samp,
+            theta_pre     = theta_pre,
+            sample_orders = sample_orders,
+            circ_scales   = circ_scales,
+            flipped       = flipped_arr,
+            stats_table   = stats_table,
+            per_rep_fmm   = per_rep_fmm,
+            sel_names     = sel_names,
+        )
+
+    def summarize(self, reps: RobustRepetitions) -> RobustOrderResult:
+        """Fases A.3 y B: resume las K repeticiones con el metodo configurado.
+
+        No modifica ``reps``, de modo que las mismas repeticiones pueden
+        resumirse con varios estimadores que solo difieran en el metodo.
+        """
+        names_top     = reps.names_top
+        n_top         = len(names_top)
+        n_samp        = reps.n_samp
+        K             = reps.sample_orders.shape[0]
+        theta_pre     = reps.theta_pre
+        sample_orders = reps.sample_orders.copy()
+        circ_scales   = reps.circ_scales.copy()
+        flipped_arr   = reps.flipped.copy()
+        stats_table   = reps.stats_table.copy()
+        per_rep_fmm   = list(reps.per_rep_fmm)
+        sel_names     = reps.sel_names
 
         # ── Fase A.3: Mediana R² por rep ──────────────────────────────
-        median_r2 = self._compute_median_r2(
-            stats_table, names_top, eval_genes, K, n_top,
-        )
+        median_r2 = self._compute_median_r2(stats_table, K, n_top)
         self._log(f"  Mediana R² por rep: {np.round(median_r2, 4).tolist()}")
 
-        n_well_fitted = self._compute_n_well_fitted(
-            stats_table, names_top, eval_genes, K, n_top,
-        )
+        n_well_fitted = self._compute_n_well_fitted(stats_table, K, n_top)
         self._log(
             f"  Genes con R² >= {self.selection_r2_threshold:g} por rep: "
             f"{n_well_fitted.astype(int).tolist()}"
         )
 
         # ── Fase B: Tarea 1 — eleccion del orden ──────────────────────
-        if self.method == "median":
-            # CIRCUST original (Larriba et al. 2023, paso 4). Agrega los
-            # parametros FMM por gen y NO define ningun orden de muestras
-            # consenso: los K ordenes se calculan, se usan para ajustar y se
-            # descartan. Por eso sample_order y circular_scale salen vacios,
-            # y es la razon de que este metodo no pueda entrar en las
-            # metricas de orden (rho, MAD), solo en las de atlas.
-            self._log("  Metodo 'median': mediana de los parametros FMM "
-                      "sobre las K repeticiones; sin orden de muestras.")
-            return RobustOrderResult(
-                sample_order       = np.array([], dtype=int),
-                circular_scale     = np.array([], dtype=np.float64),
-                method_used        = "median",
-                aggregation_method = None,
-                selected_rep       = None,
-                selection_criterion_used = None,
-                selection_score    = None,
-                sample_orders      = sample_orders,
-                circular_scales    = circ_scales,
-                direction_flipped  = flipped_arr,
-                stats_table        = stats_table,
-                per_rep_fmm_fit    = per_rep_fmm,
-                median_r2_per_rep  = median_r2,
-                n_well_fitted_per_rep = n_well_fitted,
-                selection_names    = sel_names,
-                top_gene_names     = names_top,
-                selected_fmm       = self._median_fmm_atlas(
-                    stats_table, names_top, K, n_top,
-                ),
-            )
-
         if self.method == "best_k":
             final_order, final_scale, sel_rep, sel_score = \
                 self._select_best_k(
@@ -842,7 +881,7 @@ class RobustOrderEstimator:
         self._log("  --- Ejecutando repeticiones ---")
 
         # FMM "base" para core genes dentro de la sincronizacion previa
-        # (en stab se reasigna por rep porque depende de la escala k)
+        # (con CircaFMM se reasigna por rep porque depende de la escala k)
         fmm = FMMModel(**self._fmm_kwargs) if self.fmm_method == "base" else None
 
         # Pares de consistencia a priori (Paso 2.2), resueltos una vez. Por
@@ -905,19 +944,19 @@ class RobustOrderEstimator:
                 # ── 1. CPCA sobre submatriz seleccionada ────────────────
                 # max_outlier_fraction=0: NO elimina muestras adicionales
                 # (los outliers ya se quitaron en el CPCA principal).
-                cpca_stab_kwargs = dict(self.fmm_stab_kwargs)
-                if (self.fmm_method == "stabilized"
+                cpca_circafmm_kwargs = dict(self.circafmm_kwargs)
+                if (self.fmm_method == "circafmm"
                         and not self.recalibrate_lambda_per_rep
                         and self.lambda_star_inherited is not None
-                        and "lambda_star" not in cpca_stab_kwargs):
-                    cpca_stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
+                        and "lambda_star" not in cpca_circafmm_kwargs):
+                    cpca_circafmm_kwargs["lambda_star"] = float(self.lambda_star_inherited)
 
                 sub_df = expr_full_norm.loc[genes_k]
                 cpca_k = CPCA(
                     core_genes           = genes_k,
                     max_outlier_fraction = 0.0,
                     fmm_method           = self.fmm_method,
-                    fmm_stab_kwargs      = cpca_stab_kwargs,
+                    circafmm_kwargs      = cpca_circafmm_kwargs,
                     compute_fmm_fits     = False,  # solo se usan sample_order/circular_scale
                     verbose              = False,
                 ).run(sub_df)
@@ -931,14 +970,14 @@ class RobustOrderEstimator:
                 top_k = top_matrix.iloc[:, order_k].copy()
 
                 # ── 3. Construir modelo FMM y ajustar core genes ────────
-                if self.fmm_method == "stabilized":
-                    stab_kwargs = dict(self.fmm_stab_kwargs)
+                if self.fmm_method == "circafmm":
+                    circafmm_kwargs = dict(self.circafmm_kwargs)
                     if (not self.recalibrate_lambda_per_rep
                             and self.lambda_star_inherited is not None
-                            and "lambda_star" not in stab_kwargs):
-                        stab_kwargs["lambda_star"] = float(self.lambda_star_inherited)
-                    prepared_k = prepare_dataset(esc_k, **stab_kwargs)
-                    fmm = StabilizedFMMModel(prepared=prepared_k, refine=self.fmm_refine)
+                            and "lambda_star" not in circafmm_kwargs):
+                        circafmm_kwargs["lambda_star"] = float(self.lambda_star_inherited)
+                    prepared_k = prepare_dataset(esc_k, **circafmm_kwargs)
+                    fmm = CircaFMMModel(prepared=prepared_k, refine=self.fmm_refine)
 
                 core_present = [g for g in core_genes if g in top_k.index]
                 fmm_fits = {}
@@ -995,8 +1034,8 @@ class RobustOrderEstimator:
             esc_rot   = (esc_k - arntl_peak_raw + pi) % (2.0 * pi)
             order_rot = np.argsort(esc_rot)
 
-            # Para stab reusamos el modelo ya preparado; para base, dict de kwargs
-            fmm_obj = fmm if self.fmm_method == "stabilized" else self._fmm_kwargs
+            # Para CircaFMM reusamos el modelo ya preparado; para base, dict de kwargs
+            fmm_obj = fmm if self.fmm_method == "circafmm" else self._fmm_kwargs
 
             gene_args = [
                 (
@@ -1015,7 +1054,7 @@ class RobustOrderEstimator:
             n_workers = os.cpu_count() if self.n_jobs == -1 else self.n_jobs
             if n_workers == 1:
                 gene_results = [_fit_gene(a) for a in gene_args]
-            elif self.fmm_method == "stabilized":
+            elif self.fmm_method == "circafmm":
                 # Threading: comparte prepared en memoria; BLAS/Numba liberan GIL
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -1175,54 +1214,40 @@ class RobustOrderEstimator:
     # Fase A.3 — Mediana R² (FMM) por repeticion
     # ==================================================================
 
+    @staticmethod
+    def _r2_por_rep(stats_table: np.ndarray, K: int, n_top: int) -> np.ndarray:
+        """R² (FMM) de cada gen TOP en cada repeticion, matriz (K, n_top).
+
+        La columna r2_fmm en ``stats_table`` esta en posicion 11 (0-indexed)
+        dentro de las 12 columnas FMM (5 params + 4 peaks + 3 metricas), con
+        las filas de la repeticion k en ``[k*n_top, (k+1)*n_top)``.
+        """
+        return np.asarray(stats_table[:K * n_top, 11], dtype=np.float64).reshape(K, n_top)
+
     def _compute_median_r2(
         self,
         stats_table: np.ndarray,
-        names_top:   list[str],
-        eval_genes:  list[str],
         K:           int,
         n_top:       int,
     ) -> np.ndarray:
-        """Mediana de R² (FMM) sobre ``eval_genes`` para cada repeticion.
-
-        La columna r2_fmm en ``stats_table`` esta en posicion 11 (0-indexed)
-        dentro de las 12 columnas FMM (5 params + 4 peaks + 3 metricas).
-        """
-        eval_indices = [i for i, name in enumerate(names_top) if name in eval_genes]
-
-        median_r2 = np.zeros(K, dtype=np.float64)
-        for k in range(K):
-            start = k * n_top
-            r2_vals = [stats_table[start + i, 11] for i in eval_indices]
-            if r2_vals:
-                median_r2[k] = float(np.median(r2_vals))
-        return median_r2
+        """Mediana de R² (FMM) sobre los genes TOP para cada repeticion."""
+        if n_top == 0:
+            return np.zeros(K, dtype=np.float64)
+        return np.median(self._r2_por_rep(stats_table, K, n_top), axis=1)
 
     def _compute_n_well_fitted(
         self,
         stats_table: np.ndarray,
-        names_top:   list[str],
-        eval_genes:  list[str],
         K:           int,
         n_top:       int,
     ) -> np.ndarray:
-        """Numero de genes de evaluacion con R² (FMM) >= ``selection_r2_threshold``.
+        """Numero de genes TOP con R² (FMM) >= ``selection_r2_threshold``.
 
-        Mismo conjunto de genes y misma columna que ``_compute_median_r2``, de
-        modo que ambos criterios sean comparables entre si.
+        Mismos genes y misma columna que ``_compute_median_r2``, de modo que
+        ambos criterios sean comparables entre si.
         """
-        eval_indices = [i for i, name in enumerate(names_top) if name in eval_genes]
-        tau = self.selection_r2_threshold
-
-        counts = np.zeros(K, dtype=np.float64)
-        for k in range(K):
-            start = k * n_top
-            r2_vals = np.array(
-                [stats_table[start + i, 11] for i in eval_indices], dtype=np.float64,
-            )
-            if r2_vals.size:
-                counts[k] = float(np.count_nonzero(r2_vals >= tau))
-        return counts
+        r2 = self._r2_por_rep(stats_table, K, n_top)
+        return np.count_nonzero(r2 >= self.selection_r2_threshold, axis=1).astype(np.float64)
 
     def _rep_fmm_atlas(
         self,
@@ -1250,52 +1275,6 @@ class RobustOrderEstimator:
             "peak_phase_rad":   block[:, 5],   # t_U
             "trough_phase_rad": block[:, 6],   # t_L
             "r2_fmm":           block[:, 11],
-        })
-
-    def _median_fmm_atlas(
-        self,
-        stats_table: np.ndarray,
-        names_top:   list[str],
-        K:           int,
-        n_top:       int,
-    ) -> pd.DataFrame:
-        """Atlas de CIRCUST original: mediana por gen sobre las K repeticiones.
-
-        Es el paso 4 de Larriba et al. 2023: «[M_TOP] is the matrix that
-        contains for the genes in the TOP the median of the FMM features: R2,
-        tU and omega». Reproduce ``robustSincroDBP_v3_cores`` de la
-        implementacion de referencia, que agrega los parametros por gen y
-        descarta los K ordenes de muestras.
-
-        Los parametros angulares (alpha, beta, t_U, t_L) se agregan con
-        **mediana circular**, no aritmetica: son angulos en [0, 2*pi) y la
-        mediana ordinaria se rompe en el corte 0/2*pi (la mediana de 0.1 y
-        6.2 radianes es 3.15, diametralmente opuesta a las dos). El resto (M,
-        A, omega, R2) son escalares y llevan mediana ordinaria.
-
-        Columnas de ``stats_table`` (FMM): ``0=M, 1=A, 2=alpha, 3=beta,
-        4=omega, 5=t_U, 6=t_L, 11=R2``.
-        """
-        # (K*n_top, 12) -> (K, n_top, 12) para agregar en el eje de las reps.
-        # stats_table se rellena por bloques de rep: filas [k*n_top, (k+1)*n_top).
-        cubo = stats_table[:K * n_top].reshape(K, n_top, -1)
-
-        def med_lineal(col: int) -> np.ndarray:
-            return np.median(cubo[:, :, col], axis=0)
-
-        def med_circular(col: int) -> np.ndarray:
-            return np.array([circular_median(cubo[:, i, col]) for i in range(n_top)])
-
-        return pd.DataFrame({
-            "gene_name":        list(names_top),
-            "M":                med_lineal(0),
-            "amplitude":        med_lineal(1),
-            "alpha":            med_circular(2),
-            "beta":             med_circular(3),
-            "omega":            med_lineal(4),
-            "peak_phase_rad":   med_circular(5),   # t_U
-            "trough_phase_rad": med_circular(6),   # t_L
-            "r2_fmm":           med_lineal(11),
         })
 
     # ==================================================================
@@ -1328,7 +1307,7 @@ class RobustOrderEstimator:
 
         elif crit == "n_well_fitted":
             # Maximo numero de genes bien ajustados. Ante empate (frecuente con
-            # pocos genes de evaluacion) se desempata por mediana de R², que
+            # pocos genes TOP) se desempata por mediana de R², que
             # ordena dentro del grupo empatado sin volver a mirar el umbral.
             best_count = int(n_well_fitted.max())
             tied       = np.flatnonzero(n_well_fitted == best_count)
@@ -1404,11 +1383,19 @@ class RobustOrderEstimator:
 
         Pasos:
           1. ``Theta`` (K x n_samp) con la fase de cada muestra por repeticion.
-          2. Consenso por media circular alineada (Procrustes) al preliminar;
+          2. Media circular por muestra de sus K fases, sin alinear antes las
+             repeticiones (ver ``_circular_mean_consensus``).
              ``order_A = argsort(theta_bar)`` y ``R_i`` como confianza por muestra.
-          3. Contraste preliminar via correlacion circular (Jammalamadaka),
-             tanto del consenso A como del orden best_k, para poder comparar
-             ambas estrategias contra el mismo referente.
+          3. Contraste frente al preliminar con la correlacion circular de
+             Fisher y Lee (``_fisher_lee``), tanto del consenso A como del
+             orden best_k, para poder comparar ambas estrategias contra el
+             mismo referente. El preliminar no es la verdad: que un orden
+             quede mas cerca de el no significa que sea mas correcto.
+
+        Es una salida extra: no modifica el orden ni el atlas de best_k. La
+        fase por muestra es la de ``aggregate`` con
+        ``aggregation_method="circmean"``, salvo que aqui las repeticiones
+        pesan igual y alli se ponderan por kappa.
 
         Devuelve un dict con las claves que rellenan ``RobustOrderResult`` (o
         ``{}`` si no hay escala preliminar utilizable).
@@ -1457,31 +1444,21 @@ class RobustOrderEstimator:
         circ_scales:   np.ndarray,
         n_samp:        int,
     ) -> tuple[np.ndarray, np.ndarray, float, str]:
-        """Agrega los K ordenes de MUESTRAS en uno solo via TSP3/HODs.
+        """Combina las K repeticiones de MUESTRAS en un orden y una escala.
 
-        Aplicacion de la tecnica de Barragan et al. 2015 al problema de
-        orden temporal de muestras (propuesta del TFG): los items que se
-        agregan son las n muestras, y la matriz ``Theta`` tiene forma
-        ``(K, n_samp)`` donde ``Theta[k, i]`` es la fase asignada a la
-        muestra ``i`` en la repeticion ``k``.
+        Los items son las n muestras y ``Theta[k, i]`` es la fase que la
+        repeticion ``k`` asigna a la muestra ``i``. Las repeticiones se
+        ponderan con ``w_k = kappa_k / sum(kappa)``, con kappa estimado por
+        pares, y ``aggregate_circular_orders`` devuelve el orden y la fase de
+        cada muestra segun ``aggregation_method``:
 
-        Despues deriva la escala circular asociada al orden consenso segun
-        ``consensus_scale_mode``:
+        - ``"circmean"``: media circular ponderada de las K fases, y el orden
+          que inducen. Orden y escala son coherentes por construccion.
+        - ``"tsp"`` / ``"hod"``: orden de consenso de Barragan et al. y, como
+          fase, el CIRE de la media circular ponderado por la longitud
+          resultante de cada muestra, que verifica ese orden.
 
-        - ``"circmean"`` (defecto): media circular de las K fases de cada
-          muestra. Es el estimador de fase, no una relectura del orden, de modo
-          que ``argsort(circular_scale)`` puede no coincidir con
-          ``sample_order``. La discrepancia se mide y se registra.
-        - ``"cire"``: proyeccion de esa media sobre el conjunto de vectores que
-          verifican el orden consenso (CIRE de Rueda et al.). Garantiza
-          ``phi_{o_1} <= ... <= phi_{o_n}`` como pide el anexo, a costa de
-          agrupar muestras en bloques con la misma fase.
-
-        Sobre la eleccion del modo: en simulacion, la proyeccion CIRE multiplica
-        por entre 2 y 5 el error mediano de fase frente a la media circular
-        (p.ej. 0,18 h -> 0,80 h con n=100, K=5), porque obliga a las fases a
-        respetar un orden que es a su vez una estimacion ruidosa. Por eso el
-        defecto es ``"circmean"`` y la consistencia estricta es opcional.
+        Devuelve ``(orden, escala en ese orden, MSCE del orden, metodo)``.
         """
         K = sample_orders.shape[0]
 
@@ -1492,55 +1469,27 @@ class RobustOrderEstimator:
 
         self._log(f"    Construyendo matriz Theta ({K} x {n_samp} muestras) y "
                   f"agregando con method={self.aggregation_method}...")
+        # Sin pesos explicitos, la agregacion usa los del paper,
+        # w_k = kappa_k / sum(kappa), con kappa estimado por pares.
         out = aggregate_circular_orders(
             Theta=Theta, weights=None, method=self.aggregation_method,
+            tsp_alpha=self.tsp_alpha, hodge_variant=self.hodge_variant,
         )
         consensus_order = out["order"]
-        msce_consensus  = out["msce"]
-        selected_method = out["selected_method"]
-        if self.aggregation_method == "auto":
-            detalle = ", ".join(
-                f"{m}={v:.4f}" for m, v in out["msce_by_method"].items()
-            )
-            self._log(f"    Auto-seleccion por MSCE [{detalle}] -> gana {selected_method}")
-        self._log(f"    Consenso (muestras): MSCE = {msce_consensus:.4f} "
-                  f"({selected_method})")
+        final_scale     = out["phases"][consensus_order]
+        self._log(f"    Pesos por repeticion (kappa por pares): "
+                  f"{np.round(out['weights'], 3).tolist()}")
+        self._log(f"    Consenso (muestras): MSCE = {out['msce']:.4f} "
+                  f"({out['method']})")
 
-        # Escala circular del orden consenso: media circular, por muestra, de
-        # las K fases asignadas. ``Theta[k, j]`` ya es la fase de la muestra j
-        # en la repeticion k, asi que basta reordenar por el orden consenso.
-        # (Antes se recorria un bucle K x n con una busqueda ``np.where``
-        # dentro, O(K n^2), para calcular exactamente esto mismo.)
-        Th = Theta[:, consensus_order]                      # (K, n_samp)
-        final_scale = np.arctan2(
-            np.sin(Th).mean(axis=0), np.cos(Th).mean(axis=0),
-        ) % (2.0 * pi)
+        # Diagnostico: muestras empatadas en la misma fase, que solo aparecen
+        # con tsp/hod cuando el CIRE agrupa muestras en bloques.
+        n_empates = int(np.sum(np.isclose(np.diff(final_scale), 0.0)))
+        if n_empates:
+            self._log(f"    Escala consenso: {n_empates} par(es) de muestras "
+                      f"consecutivas con la misma fase (bloques del CIRE)")
 
-        if self.consensus_scale_mode == "cire":
-            # Proyeccion sobre el conjunto de vectores que verifican el orden
-            # consenso: garantiza phi_{o_1} <= ... <= phi_{o_n} (anexo CPCA).
-            theta_by_item = np.empty(n_samp, dtype=np.float64)
-            theta_by_item[consensus_order] = final_scale
-            fitted, _ = circular_isotonic_regression(theta_by_item, consensus_order)
-            final_scale = fitted[consensus_order]
-
-        # Diagnostico: en modo "circmean" el orden que induce la escala no tiene
-        # por que coincidir con el orden consenso. Se mide para poder reportarlo.
-        n_desc = int(np.sum(np.diff(final_scale) < 0.0))
-        self._log(
-            f"    Escala consenso [{self.consensus_scale_mode}]: {n_desc} "
-            f"descenso(s) a lo largo del orden consenso (1 = solo el cierre "
-            f"del circulo)"
-        )
-        if self.consensus_scale_mode != "cire" and n_desc > 1:
-            self._log(
-                "    AVISO: sample_order (consenso TSP3/HODs) y "
-                "argsort(circular_scale) no coinciden. Son dos estimadores "
-                "distintos. Usa consensus_scale_mode='cire' si necesitas que "
-                "la escala verifique el orden por construccion."
-            )
-
-        return consensus_order, final_scale, msce_consensus, selected_method
+        return consensus_order, final_scale, out["msce"], out["method"]
 
     # ==================================================================
     # Utilidades
@@ -1549,3 +1498,123 @@ class RobustOrderEstimator:
     def _log(self, message: str) -> None:
         if self.verbose:
             print(message, flush=True)
+
+
+# ===========================================================================
+# Atlas del tejido
+# ===========================================================================
+
+def build_atlas(
+    method_used:           str,
+    selected_fmm:          pd.DataFrame,
+    top_matrix:            pd.DataFrame,
+    sample_order:          np.ndarray,
+    circular_scale:        np.ndarray,
+    fmm_method:            str        = "base",
+    fmm_length_alpha_grid: int        = 48,
+    fmm_length_omega_grid: int        = 24,
+    fmm_num_reps:          int        = 3,
+    lambda_star:           float|None = None,
+    fmm_refine:            bool       = False,
+    n_jobs:                int        = -1,
+) -> pd.DataFrame:
+    """
+    Construye la tabla [M^TOP] del atlas circadiano del tejido
+    (Larriba et al. 2023, Step 4): una fila por gen TOP con sus
+    parametros FMM finales (R^2, M, A, alpha, beta, omega, t_U, t_L) +
+    clasificacion day/night, ordenada por R^2 descendente.
+
+    Sustituye a la mediana de las K estimaciones del CIRCUST original:
+
+    - ``method_used="best_k"``: [M^TOP] = parametros FMM **de la rep
+      seleccionada**, que llegan ya calculados en ``selected_fmm``
+      (``RobustOrderResult.selected_fmm``) y son consistentes con su orden de
+      muestras. No se promedia sobre las K (eso mezclaria ordenes ya
+      descartados por el criterio de seleccion).
+    - ``method_used="aggregate"``: el orden consenso no coincide con ninguna
+      rep individual, asi que **se re-ajusta FMM por gen** sobre
+      ``top_matrix`` reordenada por ``sample_order``, usando
+      ``circular_scale`` como escala.
+
+    Recibe datos planos y no los objetos de resultado de las etapas, de modo
+    que el atlas se pueda construir a partir de cualquier orden de muestras.
+    Los parametros FMM son los de :class:`RobustOrderEstimator`; con CircaFMM,
+    ``lambda_star`` es el heredado del CPCA (si es None se recalibra).
+
+    ``n_jobs`` sigue el convenio de joblib (-1 = todos los nucleos). El estudio
+    de simulacion pasa 1 porque ya paraleliza a nivel de celda: sin eso cada
+    celda abriria un pool del tamano de la maquina dentro de otro pool.
+    """
+    top_names = list(top_matrix.index)
+
+    if method_used == "best_k":
+        # Parametros de la rep elegida: no hay nada que re-ajustar.
+        raw = selected_fmm[[
+            "gene_name", "r2_fmm", "M", "amplitude",
+            "alpha", "beta", "omega",
+            "peak_phase_rad", "trough_phase_rad",
+        ]].copy()
+    else:
+        final_scale = np.asarray(circular_scale, dtype=np.float64)
+        rows_mat = (top_matrix.iloc[:, sample_order]
+                    .loc[top_names].values.astype(np.float64))
+
+        # El ajuste de cada gen es independiente, asi que se reparte entre
+        # trabajadores igual que en las etapas anteriores. Como bucle
+        # secuencial sobre los miles de genes TOP suponia un tercio del tiempo
+        # total del pipeline con la matriz completa.
+        from joblib import Parallel, delayed
+
+        if fmm_method == "base":
+            # loky (multiproceso): los argumentos por gen son pequenos y el
+            # ajuste es intensivo en CPU sin liberar el GIL.
+            fits = Parallel(n_jobs=n_jobs)(
+                delayed(_fit_fmm_one)(
+                    rows_mat[i], final_scale,
+                    fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps,
+                )
+                for i in range(len(top_names))
+            )
+        else:
+            circafmm_kwargs: dict = {}
+            if lambda_star is not None:
+                circafmm_kwargs["lambda_star"] = float(lambda_star)
+            prepared       = prepare_dataset(final_scale, **circafmm_kwargs)
+            circafmm_model = CircaFMMModel(prepared=prepared, refine=fmm_refine)
+            # threading: los workers comparten ``prepared`` en memoria en vez
+            # de serializar sus matrices precomputadas hacia cada proceso.
+            fits = Parallel(n_jobs=n_jobs, backend="threading")(
+                delayed(_fit_fmm_one_circafmm)(rows_mat[i], final_scale, circafmm_model)
+                for i in range(len(top_names))
+            )
+
+        raw = pd.DataFrame({
+            "gene_name":        list(top_names),
+            "r2_fmm":           [float(f[2]) for f in fits],
+            "M":                [float(f[4]) for f in fits],
+            "amplitude":        [float(f[3]) for f in fits],
+            "alpha":            [float(f[5]) for f in fits],
+            "beta":             [float(f[6]) for f in fits],
+            "omega":            [float(f[1]) for f in fits],
+            "peak_phase_rad":   [float(f[0]) for f in fits],
+            "trough_phase_rad": [FMMModel.trough_time(f[5], f[6], f[1])
+                                 for f in fits],
+        })
+
+    # Clasificacion day/night. No se convierte peak_phase_rad a horas: esa
+    # conversion asume un periodo de 24h y una correspondencia directa entre
+    # fase circular y hora real del dia que no esta verificada.
+    raw["classification"] = np.where(
+        raw["peak_phase_rad"] < np.pi, "day", "night",
+    )
+    # Se publican los CINCO parametros del modelo y no solo (A, t_U, omega).
+    # Con esos tres la onda NO queda determinada: fijando pico y omega, mover
+    # beta cambia la forma por completo, de subir en 7 h y bajar en 17 a lo
+    # contrario, con diferencias de hasta el 160 % de la amplitud. El valle
+    # t_L es el grado de libertad que faltaba, y ademas es interpretable:
+    # junto con el pico da los tiempos de subida y bajada del gen.
+    return raw[[
+        "gene_name", "r2_fmm",
+        "M", "amplitude", "alpha", "beta", "omega",
+        "peak_phase_rad", "trough_phase_rad", "classification",
+    ]].sort_values("r2_fmm", ascending=False).reset_index(drop=True)

@@ -89,39 +89,25 @@ class SynchronizationResult:
     Attributes
     ----------
     sample_order : np.ndarray de int, forma (n_muestras,)
-        Indices finales de muestra en la matriz de expresion limpia.
-        Equivalente en R: ``basicOrdRefG2[[1]]``  (= ``indSin``).
-
+        Indices finales de muestra en la matriz de expresion sincronizada.
+        
     circular_scale : np.ndarray de float, forma (n_muestras,)
         Eje temporal circular en [0, 2π) tras correccion de direccion.
-        Equivalente en R: ``basicOrdRefG2[[2]]``  (= ``escSincroRefG``).
 
     expr_ordered : pd.DataFrame, forma (n_genes, n_muestras)
         Matriz de expresion normalizada completa en el orden circular final.
-        Equivalente en R: ``basicOrdRefG2[[3]]``  (= ``matNewNew``).
 
     peak_times : np.ndarray de float, forma (n_genes_core,)
         Tiempo de pico FMM para cada gen central en el marco de coordenadas final.
-        Equivalente en R: ``basicOrdRefG2[[4]]``  (= ``peaksPreNew``).
 
     r2_fmm : np.ndarray de float, forma (n_genes_core,)
         R² del ajuste FMM para cada gen central.
-        Equivalente en R: ``basicOrdRefG2[[5]]``.
 
     fmm_params : np.ndarray de float, forma (n_genes_core, 5)
         Parametros FMM [M, A, α, β, ω] por gen central en el nuevo marco.
-        Equivalente en R: ``basicOrdRefG2[[6]]``  (= ``pars``).
 
     direction_flipped : bool
         True si la direccion fue invertida (por el Paso 2.1 o 2.2).
-        Equivalente en R: ``basicOrdRefG2[[7]]``  (= ``cambiaOri``).
-
-    within_group_indices : np.ndarray de int, forma (n_muestras,)
-        Indices posicionales base 0 dentro del grupo tras posible inversion.
-        Equivalente en R: ``basicOrdRefG2[[8]]``  (= ``indNewNew``).
-
-    core_genes : list[str]
-        Simbolos de genes centrales en el orden utilizado.
 
     day_genes : list[str]
         Genes centrales (exc. anchor y direction) con pico en [0, π).
@@ -131,27 +117,21 @@ class SynchronizationResult:
 
     pre_sample_order : np.ndarray de int
         Orden de muestras del Paso 2.1 (antes de la verificacion del Paso 2.2).
-        Equivalente en R: ``preOrdRefG2[[1]]``.
 
     pre_circular_scale : np.ndarray de float
         Escala circular del Paso 2.1.
-        Equivalente en R: ``preOrdRefG2[[2]]``.
 
     pre_expr_ordered : pd.DataFrame
         Matriz de expresion ordenada por el Paso 2.1.
-        Equivalente en R: ``preOrdRefG2[[3]]``.
 
     pre_peak_times : np.ndarray de float
         Tiempos de pico FMM del Paso 2.1.
-        Equivalente en R: ``preOrdRefG2[[4]]``.
 
     pre_fmm_params : np.ndarray de float, forma (n_genes_core, 5)
         Parametros FMM del Paso 2.1.
-        Equivalente en R: ``preOrdRefG2[[6]]``  (= ``parCore``).
 
     pre_direction_reversed : bool
         True si el Paso 2.1 invirtio la direccion (direction_gene en la mitad incorrecta).
-        Equivalente en R: ``preOrdRefG2[[13]]``  (= ``reverse``).
     """
 
     sample_order:           np.ndarray
@@ -161,8 +141,6 @@ class SynchronizationResult:
     r2_fmm:                 np.ndarray
     fmm_params:             np.ndarray
     direction_flipped:      bool
-    within_group_indices:   np.ndarray
-    core_genes:             list
 
     day_genes:              list       = field(default_factory=list)
     night_genes:            list       = field(default_factory=list)
@@ -322,7 +300,7 @@ class CircularSynchronizer:
         # ── Paso 2.2: verificacion de consistencia biologica ──────────────
         self._log("  Paso 2.2 — verificando consistencia biologica ...")
         (o_fin, esc_fin, mat_fin, peaks_fin,
-         pars_fin, flipped_22, ind_new) = self._basic_order(
+         pars_fin, flipped_22) = self._basic_order(
             o_pre, esc_pre, mat_pre, peaks_pre, par_pre, r2_fmm, core_genes
         )
 
@@ -336,8 +314,6 @@ class CircularSynchronizer:
             r2_fmm                 = r2_fmm,
             fmm_params             = pars_fin,
             direction_flipped      = direction_flipped,
-            within_group_indices   = ind_new,
-            core_genes             = core_genes,
             day_genes              = names_day,
             night_genes            = names_night,
             pre_sample_order       = o_pre,
@@ -473,7 +449,7 @@ class CircularSynchronizer:
 
         Returns
         -------
-        o_new, esc_new, mat_new, peaks_new, pars_new, flipped, ind_new
+        o_new, esc_new, mat_new, peaks_new, pars_new, flipped
         """
         direction_i = core_genes.index(self.direction_gene) if self.direction_gene in core_genes else None
 
@@ -482,8 +458,7 @@ class CircularSynchronizer:
                 f"  AVISO: {self.direction_gene} no encontrado en core_genes; "
                 "omitiendo verificacion de direccion."
             )
-            n = len(o)
-            return o, esc, mat, peaks, par, False, np.arange(n)
+            return o, esc, mat, peaks, par, False
 
         direction_peak = peaks[direction_i]
         n_core         = len(core_genes)
@@ -548,8 +523,6 @@ class CircularSynchronizer:
             )
             flip = False
 
-        n = len(o)
-
         if flip:
             self._log(
                 f"    Invirtiendo direccion  "
@@ -563,7 +536,6 @@ class CircularSynchronizer:
             pars_new        = par.copy()
             pars_new[:, 2]  = (2.0 * pi - par[:, 2]) % (2.0 * pi)  # α
             pars_new[:, 3]  = (2.0 * pi - par[:, 3]) % (2.0 * pi)  # β
-            ind_new         = np.arange(n - 1, -1, -1)
         else:
             self._log("    La direccion es consistente — no se necesita inversion.")
             peaks_new = peaks.copy()
@@ -571,9 +543,8 @@ class CircularSynchronizer:
             esc_new   = esc.copy()
             mat_new   = mat.copy()
             pars_new  = par.copy()
-            ind_new   = np.arange(n)
 
-        return o_new, esc_new, mat_new, peaks_new, pars_new, flip, ind_new
+        return o_new, esc_new, mat_new, peaks_new, pars_new, flip
 
     # ------------------------------------------------------------------
     # Utilidad

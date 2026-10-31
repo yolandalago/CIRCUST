@@ -46,7 +46,7 @@ def _llamar(sync, picos, r2=None, n=8):
     par = np.zeros((len(CORE), 5))
     par[:, 2] = picos
     r2_fmm = np.full(len(CORE), 0.9) if r2 is None else np.asarray(r2, float)
-    *_, flip, _ = sync._basic_order(o, esc, mat, np.asarray(picos, float),
+    *_, flip = sync._basic_order(o, esc, mat, np.asarray(picos, float),
                                     par, r2_fmm, CORE)
     return flip
 
@@ -109,9 +109,9 @@ def test_una_cadena_larga_sigue_detectando_la_reflexion():
     par = np.zeros((len(core), 5))
     r2  = np.full(len(core), 0.9)
 
-    *_, flip_ok, _ = sync._basic_order(o, esc, mat, picos, par, r2, core)
+    *_, flip_ok = sync._basic_order(o, esc, mat, picos, par, r2, core)
     reflejados = (TWO_PI - picos) % TWO_PI
-    *_, flip_refl, _ = sync._basic_order(o, esc, mat, reflejados, par, r2, core)
+    *_, flip_refl = sync._basic_order(o, esc, mat, reflejados, par, r2, core)
     assert flip_ok is False
     assert flip_refl is True
 

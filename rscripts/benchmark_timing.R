@@ -54,6 +54,12 @@ OUT_CSV    <- get_opt("--out", file.path(OUT_DIR, "timing_R.csv"))
 LABEL      <- get_opt("--label", "matrixIn")
 if (!is.na(MATRIX_CSV)) MATRIX_CSV <- normalizePath(MATRIX_CSV)
 if (!grepl("^/", OUT_CSV)) OUT_CSV <- file.path(REPO_ROOT, OUT_CSV)
+# A absoluto tambien el directorio de volcado. El bucle corre en un scratch
+# temporal que se borra al terminar, asi que una ruta relativa se resolveria
+# ahi dentro y los ficheros desaparecerian sin dejar rastro. Paso ya una vez.
+if (!is.na(DUMP_DIR) && !grepl("^/", DUMP_DIR)) {
+  DUMP_DIR <- file.path(REPO_ROOT, DUMP_DIR)
+}
 dir.create(dirname(OUT_CSV), showWarnings = FALSE, recursive = TRUE)
 
 coreG <- c("PER1", "PER2", "PER3", "CRY1", "CRY2", "ARNTL", "CLOCK",

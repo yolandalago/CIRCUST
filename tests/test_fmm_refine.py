@@ -1,5 +1,5 @@
 """
-Refinamiento local opcional de (alpha, omega) del FMM estabilizado, Seccion
+Refinamiento local opcional de (alpha, omega) de CircaFMM, Seccion
 S3.4.4 y Algoritmo S2 del suplemento de CircaFMM.
 
 ``_refine_jit`` se compara con una transcripcion literal del Algoritmo S2 en
@@ -11,7 +11,7 @@ import math
 import numpy as np
 import pytest
 
-from circust.fitting import fmm_stabilized as fs
+from circust.fitting import circafmm as fs
 
 TWO_PI = 2.0 * math.pi
 OMEGA0, POT = 0.10, 3.0
@@ -102,18 +102,18 @@ def test_refinado_desactivado_por_defecto():
     from circust.robust_order import RobustOrderEstimator
     from circust.top_genes import TopGeneSelector
 
-    assert fs.StabilizedFMMModel().refine is False
-    assert CPCA(fmm_method="stabilized", verbose=False).fmm_refine is False
-    assert TopGeneSelector(fmm_method="stabilized", verbose=False).fmm_refine is False
-    assert RobustOrderEstimator(fmm_method="stabilized", verbose=False).fmm_refine is False
+    assert fs.CircaFMMModel().refine is False
+    assert CPCA(fmm_method="circafmm", verbose=False).fmm_refine is False
+    assert TopGeneSelector(fmm_method="circafmm", verbose=False).fmm_refine is False
+    assert RobustOrderEstimator(fmm_method="circafmm", verbose=False).fmm_refine is False
 
 
 def test_cpca_pasa_el_refinado_al_modelo():
     from circust.cpca import CPCA
 
     t = np.linspace(0, TWO_PI, 24, endpoint=False)
-    stab = {"lambda_star": LAMBDA}
-    assert CPCA(fmm_method="stabilized", fmm_stab_kwargs=stab, fmm_refine=True,
+    circa = {"lambda_star": LAMBDA}
+    assert CPCA(fmm_method="circafmm", circafmm_kwargs=circa, fmm_refine=True,
                 verbose=False)._make_fmm_model(t).refine is True
-    assert CPCA(fmm_method="stabilized", fmm_stab_kwargs=stab,
+    assert CPCA(fmm_method="circafmm", circafmm_kwargs=circa,
                 verbose=False)._make_fmm_model(t).refine is False

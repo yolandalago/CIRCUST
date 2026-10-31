@@ -65,21 +65,21 @@ se imprimen por stdout durante la ejecucion pero no se guardan en disco.
 
 Notas sobre la agregacion
 -------------------------
-La **agregacion opera a nivel de MUESTRAS** (propuesta del TFG, seccion 2:
-aplicar la tecnica de Barragan 2015 al orden de muestras de CIRCUST):
+La **agregacion opera a nivel de MUESTRAS**:
 
 - ``--robust-method best_k``: se selecciona la repeticion con mayor
   mediana R^2 y se usan su orden de muestras + sus parametros FMM por gen.
-- ``--robust-method aggregate``: TSP3/HODs se aplica a la matriz
-  ``(K reps x n_muestras)`` de fases asignadas por muestra para producir
-  UN orden de muestras consenso. Despues se re-ajusta FMM por gen sobre
-  ese orden consenso para obtener los parametros del atlas.
+- ``--robust-method aggregate``: las K repeticiones (matriz ``K reps x
+  n_muestras`` de fases por muestra) se combinan en un orden y una fase por
+  muestra. Por defecto con la media circular ponderada (``--aggregation
+  circmean``), o con la agregacion de ordenes de Barragan et al. (2015)
+  (``tsp``, ``hod``). Despues se re-ajusta FMM por gen con esas fases para
+  obtener los parametros del atlas.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -95,7 +95,7 @@ from circust.preprocessing import load_expression_matrix, Preprocessor
 from circust.cpca          import CPCA
 from circust.synchronizer  import CircularSynchronizer
 from circust.top_genes     import TopGeneSelector
-from circust.robust_order  import RobustOrderEstimator
+from circust.robust_order  import RobustOrderEstimator, build_atlas
 from circust.core_genes    import CoreGeneSelector
 
 
@@ -186,27 +186,26 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
 
     # ── Parametros del algoritmo (5 esenciales) ──────────────────────────
     parser.add_argument(
-        "--fmm-method", choices=["base", "stabilized"], default="base",
+        "--fmm-method", choices=["base", "circafmm"], default="base",
         help="Modelo FMM: 'base' (Larriba/Rueda 2019, MLE puro) o "
-             "'stabilized' (power-roughness + KDE von Mises). "
-             "Cuando se usa 'stabilized', CPCA calibra lambda y se hereda "
+             "'circafmm' (power-roughness + KDE von Mises). "
+             "Cuando se usa 'circafmm', CPCA calibra lambda y se hereda "
              "a TopGenes y RobustOrder. Por defecto: base.",
     )
     parser.add_argument(
         "--fmm-refine", action="store_true",
         help="Activa el refinamiento local opcional de (alpha, omega) del FMM "
-             "estabilizado (Seccion S3.4.4, Algoritmo S2 del suplemento de "
+             "CircaFMM (Seccion S3.4.4, Algoritmo S2 del suplemento de "
              "CircaFMM) en todas las etapas. Solo aplica con "
-             "--fmm-method=stabilized. Por defecto desactivado, como en "
+             "--fmm-method=circafmm. Por defecto desactivado, como en "
              "runCircaFMM.R.",
     )
     parser.add_argument(
-        "--robust-method", choices=["median", "best_k", "aggregate"],
+        "--robust-method", choices=["best_k", "aggregate"],
         default="best_k",
-        help="Como se resumen las K repeticiones: 'median' (CIRCUST original, "
-             "mediana de los parametros FMM por gen; NO produce orden de "
-             "muestras), 'best_k' (selecciona una repeticion) o 'aggregate' "
-             "(consenso TSP3/HODs de los K ordenes). Por defecto: best_k.",
+        help="Como se resumen las K repeticiones: 'best_k' (selecciona una "
+             "repeticion) o 'aggregate' (consenso TSP3/HODs de los K "
+             "ordenes). Por defecto: best_k.",
     )
     parser.add_argument(
         "--selection-criterion",
@@ -217,31 +216,41 @@ conjuntos de genes disponibles: {list(CoreGeneSelector.PRESETS.keys())}
              "mas representativo). Por defecto: r2_median.",
     )
     parser.add_argument(
-        "--selection-r2-threshold", type=float, default=0.65,
-        help="Umbral tau del criterio 'n_well_fitted'. Valor provisional 0.65, "
-             "pendiente de calibrar en el estudio de simulacion.",
+        "--selection-r2-threshold", type=float, default=0.5,
+        help="Umbral tau del criterio 'n_well_fitted': R2 minimo para contar "
+             "un gen como bien ajustado. Con 0.5 (el de R) el criterio "
+             "discrimina poco sobre el conjunto TOP, que ya se filtro con "
+             "ese mismo umbral. Por defecto: 0.5.",
     )
     parser.add_argument(
-        "--aggregation", choices=["auto", "tsp3", "hods"], default="auto",
-        help="Metodo de agregacion de ordenes. Solo aplica si "
-             "--robust-method=aggregate. Por defecto: auto (corre TSP3 y "
-             "HODs y elige el de menor MSCE).",
+        "--aggregation", choices=["circmean", "tsp", "tsp3", "hod", "hods"],
+        default="circmean",
+        help="Como se combinan las K repeticiones. Solo aplica si "
+             "--robust-method=aggregate. 'circmean' (media circular ponderada "
+             "de las K fases, por defecto), 'tsp' o 'hod' (agregacion de "
+             "ordenes de Barragan et al., con las fases reconstruidas por CIRE "
+             "bajo ese orden). 'tsp3' y 'hods' son sinonimos de 'tsp' y 'hod'.",
     )
     parser.add_argument(
-        "--consensus-scale", choices=["circmean", "cire"], default="circmean",
-        help="Como se construye la escala circular del orden consenso. Solo "
-             "aplica si --robust-method=aggregate. 'circmean' (media circular "
-             "de las K fases, mejor estimador de fase) o 'cire' (proyeccion "
-             "isotonica circular sobre el orden consenso, que garantiza "
-             "phi_o1 <= ... <= phi_on a costa de precision). Por defecto: "
-             "circmean.",
+        "--hodge-variant", choices=["s", "p", "b", "r"], default="s",
+        help="Solo con --aggregation=hod. Flujo triplewise del metodo de Hodge (Tabla 2 de Barragan et "
+             "al.): s = diferencias de fase (HODs), p = posiciones, b = solo "
+             "el sentido de cada triplete, r = longitud resultante. "
+             "Por defecto: s.",
     )
     parser.add_argument(
-        "--target-size", type=int, default=100,
-        help="Numero objetivo de genes del conjunto TOP. El cupo se reparte "
-             "entre los sectores y en cada uno se toman los de mayor R2_FMM, "
-             "para preservar la cobertura circular. Los genes core forzados se "
-             "anaden despues. Por defecto: 100.",
+        "--tsp-alpha", type=float, default=3.0,
+        help="Solo con --aggregation=tsp. Penalizacion alpha >= 1 de los costes del TSP (ecuacion 7 de "
+             "Barragan et al.), que fija la variante TSPalpha. Admite 'inf'. "
+             "Por defecto: 3 (TSP3).",
+    )
+    parser.add_argument(
+        "--top-fraction", type=float, default=0.005,
+        help="Fraccion del total de genes de la matriz que se retiene en el "
+             "conjunto TOP, en (0, 1]. El cupo se reparte entre los sectores y "
+             "en cada uno se toman los de mayor R2_FMM, para preservar la "
+             "cobertura circular. Los genes core forzados se anaden despues. "
+             "Por defecto: 0.005.",
     )
     parser.add_argument(
         "--n-sectors", type=int, default=8,
@@ -272,130 +281,6 @@ def _banner(msg: str) -> None:
     print("=" * width)
     print(f"  {msg}")
     print("=" * width)
-
-
-def _build_atlas(
-    method_used:    str,
-    selected_fmm:   pd.DataFrame,
-    top_matrix:     pd.DataFrame,
-    sample_order:   np.ndarray,
-    circular_scale: np.ndarray,
-    lambda_star:    float | None,
-    fmm_method:     str,
-    cfg:            dict,
-    n_jobs:         int | None = None,
-    fmm_refine:     bool = False,
-) -> pd.DataFrame:
-    """
-    Construye la tabla [M^TOP] del atlas circadiano del tejido
-    (Larriba et al. 2023, Step 4): una fila por gen TOP con sus
-    parametros FMM finales (R^2, A, t_U, omega) + clasificacion
-    day/night, ordenada por R^2 descendente.
-
-    La **agregacion opera a nivel de MUESTRAS** (propuesta del TFG,
-    seccion 2: aplicar la tecnica de Barragan 2015 al orden de muestras):
-    los K reps producen K orderings de muestras, y se consolida en UN
-    orden consenso. Luego se ajusta FMM por gen sobre ese consenso.
-
-    - ``method_used="best_k"``: [M^TOP] = parametros FMM **de la rep
-      seleccionada**, que llegan ya calculados en ``selected_fmm`` y son
-      consistentes con su orden de muestras. No se promedia sobre las K (eso
-      mezclaria ordenes ya descartados por peores segun el R² mediano).
-    - ``method_used="aggregate"``: el orden consenso (TSP3/HODs sobre los K
-      orderings de muestras) no coincide con ninguna rep individual, asi
-      que **se re-fittea FMM por gen** sobre ``top_matrix`` reordenada por
-      ``sample_order``, usando ``circular_scale`` como escala.
-
-    Recibe datos planos y no los objetos de resultado de las etapas, de modo
-    que el atlas se pueda construir a partir de cualquier orden de muestras.
-    """
-    top_names = list(top_matrix.index)
-
-    if method_used in ("best_k", "median"):
-        # best_k : parametros de la rep elegida.
-        # median : mediana por gen sobre las K (CIRCUST original). En los dos
-        #          casos el atlas ya viene calculado en selected_fmm y no hay
-        #          nada que re-ajustar.
-        raw = selected_fmm[[
-            "gene_name", "r2_fmm", "M", "amplitude",
-            "alpha", "beta", "omega",
-            "peak_phase_rad", "trough_phase_rad",
-        ]].copy()
-    else:
-        # Re-fittear FMM sobre el orden consenso de MUESTRAS
-        top_matrix_final = top_matrix.iloc[:, sample_order]
-        final_scale = np.asarray(circular_scale, dtype=np.float64)
-
-        # El ajuste de cada gen es independiente, asi que se reparte entre
-        # procesos igual que en las etapas 3 y 4. Antes era un bucle secuencial
-        # sobre los miles de genes TOP, y con la matriz completa suponia un
-        # tercio del tiempo total del pipeline corriendo en un unico nucleo.
-        from joblib import Parallel, delayed
-        from circust.top_genes import _fit_fmm_one, _fit_fmm_one_stab
-
-        rows_mat = top_matrix_final.loc[top_names].values.astype(np.float64)
-        # ``n_jobs`` explicito para el estudio de simulacion, que paraleliza a
-        # nivel de celda: sin esto cada celda abriria un pool del tamano de la
-        # maquina dentro de otro pool del mismo tamano.
-        n_jobs   = n_jobs if n_jobs is not None else (os.cpu_count() or 1)
-
-        if fmm_method == "base":
-            ag, og, nr = (cfg["fmm_alpha_grid"], cfg["fmm_omega_grid"], cfg["fmm_reps"])
-            # loky (multiproceso): los argumentos por gen son pequenos y el
-            # ajuste es intensivo en CPU sin liberar el GIL.
-            fits = Parallel(n_jobs=n_jobs)(
-                delayed(_fit_fmm_one)(rows_mat[i], final_scale, ag, og, nr)
-                for i in range(len(top_names))
-            )
-        else:
-            from circust.fitting.fmm_stabilized import (
-                StabilizedFMMModel, prepare_dataset,
-            )
-            stab_kwargs: dict = {}
-            if lambda_star is not None:
-                stab_kwargs["lambda_star"] = float(lambda_star)
-            prepared   = prepare_dataset(final_scale, **stab_kwargs)
-            stab_model = StabilizedFMMModel(prepared=prepared, refine=fmm_refine)
-            # threading: los workers comparten ``prepared`` en memoria en vez
-            # de serializar sus matrices precomputadas hacia cada proceso.
-            fits = Parallel(n_jobs=n_jobs, backend="threading")(
-                delayed(_fit_fmm_one_stab)(rows_mat[i], final_scale, stab_model)
-                for i in range(len(top_names))
-            )
-
-        from circust.fitting.fmm import FMMModel
-        raw = pd.DataFrame({
-            "gene_name":        list(top_names),
-            "r2_fmm":           [float(f[2]) for f in fits],
-            "M":                [float(f[4]) for f in fits],
-            "amplitude":        [float(f[3]) for f in fits],
-            "alpha":            [float(f[5]) for f in fits],
-            "beta":             [float(f[6]) for f in fits],
-            "omega":            [float(f[1]) for f in fits],
-            "peak_phase_rad":   [float(f[0]) for f in fits],
-            "trough_phase_rad": [FMMModel.trough_time(f[5], f[6], f[1])
-                                 for f in fits],
-        })
-
-    # Postprocesar: clasificacion day/night. No se convierte peak_phase_rad a
-    # horas: esa conversion asume un periodo de 24h y una correspondencia
-    # directa entre fase circular y hora real del dia que no esta verificada
-    # (mismo motivo por el que sample_order.csv tampoco lleva phase_h).
-    raw["classification"] = np.where(
-        raw["peak_phase_rad"] < np.pi, "day", "night",
-    )
-    # Se publican los CINCO parametros del modelo y no solo (A, t_U, omega).
-    # Con esos tres la onda NO queda determinada: fijando pico y omega, mover
-    # beta cambia la forma por completo, de subir en 7 h y bajar en 17 a lo
-    # contrario, con diferencias de hasta el 160 % de la amplitud. El valle
-    # t_L es el grado de libertad que faltaba, y ademas es interpretable:
-    # junto con el pico da los tiempos de subida y bajada del gen.
-    atlas = raw[[
-        "gene_name", "r2_fmm",
-        "M", "amplitude", "alpha", "beta", "omega",
-        "peak_phase_rad", "trough_phase_rad", "classification",
-    ]].sort_values("r2_fmm", ascending=False).reset_index(drop=True)
-    return atlas
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -429,7 +314,8 @@ def main() -> None:
     print(f"  Gen direccion    : {cfg['direction_gene']}")
     print(f"  FMM method       : {args.fmm_method}")
     print(f"  Robust method    : {args.robust_method}"
-          + (f"  (agregacion: {args.aggregation})"
+          + (f"  (agregacion: {args.aggregation}, tsp_alpha={args.tsp_alpha:g}, "
+             f"hodge_variant={args.hodge_variant})"
              if args.robust_method == "aggregate" else ""))
     print(f"  K repeticiones   : {args.n_reps}")
     print(f"  Semilla          : {args.seed}")
@@ -514,12 +400,12 @@ def main() -> None:
         r2_fmm_threshold      = 0.5,
         omega_min             = 0.1,
         n_sectors             = args.n_sectors,
-        target_size           = args.target_size,
+        top_fraction          = args.top_fraction,
         fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
         fmm_num_reps          = cfg["fmm_reps"],
         fmm_method            = args.fmm_method,
-        lambda_star           = cpca_result.lambda_star,   # heredado si stabilized
+        lambda_star           = cpca_result.lambda_star,   # heredado si circafmm
         fmm_refine            = args.fmm_refine,
         n_jobs                = -1,
         verbose               = True,
@@ -545,16 +431,17 @@ def main() -> None:
         selection_criterion  = args.selection_criterion,
         selection_r2_threshold = args.selection_r2_threshold,
         aggregation_method   = args.aggregation,
-        consensus_scale_mode = args.consensus_scale,
+        tsp_alpha            = args.tsp_alpha,
+        hodge_variant        = args.hodge_variant,
         anchor_gene          = cfg["anchor_gene"],
         direction_gene       = cfg["direction_gene"],
         fmm_length_alpha_grid= cfg["fmm_alpha_grid"],
         fmm_length_omega_grid= cfg["fmm_omega_grid"],
         fmm_num_reps         = cfg["fmm_reps"],
         fmm_method           = args.fmm_method,
-        lambda_star          = cpca_result.lambda_star,   # heredado si stabilized
+        lambda_star          = cpca_result.lambda_star,   # heredado si circafmm
         # Lambda se calibra UNA vez en el CPCA y se hereda. Recalibrarla por
-        # repeticion costaba el 99 % del sobrecoste del FMM estabilizado y no
+        # repeticion costaba el 99 % del sobrecoste de CircaFMM y no
         # aportaba: sobre la misma escala, cambiando solo la semilla del Monte
         # Carlo, devuelve de 1,23 a 8,76, y esa dispersion supera a la que hay
         # entre repeticiones distintas. Ver el docstring del parametro.
@@ -579,21 +466,14 @@ def main() -> None:
     # seccion 2 de la propuesta). Es lo que se valida contra ground truth
     # (tiempos reales conocidos o TOD), como hace el paper original en
     # Fig 5 (skeletal muscle) y Fig 7A (baboons).
-    if robust_result.sample_order.size == 0:
-        # method="median" (CIRCUST original) no produce orden de muestras: las
-        # K ordenaciones se usan para ajustar y se descartan. No se escribe un
-        # fichero vacio que luego parezca un fallo.
-        print("    sample_order.csv NO se escribe: el metodo 'median' no "
-              "define un orden de muestras consenso.")
-    else:
-        robust_names = [order_result.expr_ordered.columns[i]
-                        for i in robust_result.sample_order]
-        phases_rad   = np.asarray(robust_result.circular_scale, dtype=np.float64)
-        pd.DataFrame({
-            "sample_name":    robust_names,
-            "circular_phase": phases_rad,   # radianes en [0, 2*pi) — canonico
-        }).to_csv(output_dir / "sample_order.csv", index=False)
-        print(f"    Saved: sample_order.csv  ({len(phases_rad)} muestras)")
+    robust_names = [order_result.expr_ordered.columns[i]
+                    for i in robust_result.sample_order]
+    phases_rad   = np.asarray(robust_result.circular_scale, dtype=np.float64)
+    pd.DataFrame({
+        "sample_name":    robust_names,
+        "circular_phase": phases_rad,   # radianes en [0, 2*pi) — canonico
+    }).to_csv(output_dir / "sample_order.csv", index=False)
+    print(f"    Saved: sample_order.csv  ({len(phases_rad)} muestras)")
 
     # ─────────────────────────────────────────────────────────────────────
     # Salida 2: [M^TOP] — atlas circadiano del tejido (UNA FILA POR GEN)
@@ -604,16 +484,19 @@ def main() -> None:
     # FMM sobre el orden de muestras consenso (en aggregate) o tomando
     # los parametros de la rep seleccionada (en best_k).
     _t = time.perf_counter()
-    atlas_df = _build_atlas(
-        method_used    = robust_result.method_used,
-        selected_fmm   = robust_result.selected_fmm,
-        top_matrix     = top_result.candidate_matrix,
-        sample_order   = robust_result.sample_order,
-        circular_scale = robust_result.circular_scale,
-        lambda_star    = cpca_result.lambda_star,
-        fmm_method     = args.fmm_method,
-        cfg            = cfg,
-        fmm_refine     = args.fmm_refine,
+    atlas_df = build_atlas(
+        method_used           = robust_result.method_used,
+        selected_fmm          = robust_result.selected_fmm,
+        top_matrix            = top_result.candidate_matrix,
+        sample_order          = robust_result.sample_order,
+        circular_scale        = robust_result.circular_scale,
+        fmm_method            = args.fmm_method,
+        fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
+        fmm_length_omega_grid = cfg["fmm_omega_grid"],
+        fmm_num_reps          = cfg["fmm_reps"],
+        lambda_star           = cpca_result.lambda_star,
+        fmm_refine            = args.fmm_refine,
+        n_jobs                = -1,
     )
     timing["build_atlas"] = time.perf_counter() - _t
     atlas_df.to_csv(output_dir / "circust_atlas.csv", index=False)
@@ -637,9 +520,13 @@ def main() -> None:
             "robust_method": args.robust_method,
             "aggregation":   (args.aggregation
                               if args.robust_method == "aggregate" else None),
+            "tsp_alpha":     (args.tsp_alpha
+                              if args.robust_method == "aggregate" else None),
+            "hodge_variant": (args.hodge_variant
+                              if args.robust_method == "aggregate" else None),
             "n_reps":        args.n_reps,
             "n_sectors":     args.n_sectors,
-            "target_size":   args.target_size,
+            "top_fraction":  args.top_fraction,
             "lambda_star":   cpca_result.lambda_star,
         },
         "seed":      args.seed,

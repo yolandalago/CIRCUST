@@ -258,3 +258,94 @@ def test_la_forma_computacional_es_la_definicion_literal():
         a, b = rng.uniform(0, TWO_PI, n), rng.uniform(0, TWO_PI, n)
         assert fisher_lee_correlation(a, b) == pytest.approx(
             _fisher_lee_doble_suma(a, b), abs=1e-12)
+
+
+# ── CRE: error relativo de concordancia ───────────────────────────────────
+
+def _genes_fmm(n=48, g=20, ruido=0.5, semilla=0):
+    """Genes ritmicos FMM con ruido, sobre tiempos uniformes al azar."""
+    rng = np.random.default_rng(semilla)
+    theta = rng.uniform(0, TWO_PI, n)
+    al, be = rng.uniform(0, TWO_PI, g), rng.uniform(0, TWO_PI, g)
+    om = rng.uniform(0.2, 0.9, g)
+    senal = np.cos(be[:, None] + 2 * np.arctan(
+        om[:, None] * np.tan((theta[None] - al[:, None]) / 2)))
+    return theta, senal + rng.normal(0, ruido, senal.shape), rng
+
+
+def test_cre_vale_cero_con_los_tiempos_verdaderos():
+    from simulation.metrics import ajuste_fmm, cre
+    theta, Y, _ = _genes_fmm()
+    ref = ajuste_fmm(Y, theta)
+    assert cre(ref, ajuste_fmm(Y, theta)) == 0.0
+
+
+def test_cre_crece_al_estropear_las_fases():
+    from simulation.metrics import ajuste_fmm, cre
+    theta, Y, rng = _genes_fmm()
+    ref = ajuste_fmm(Y, theta)
+    valores = [cre(ref, ajuste_fmm(Y, (theta + rng.normal(0, s, theta.size)) % TWO_PI))
+               for s in (0.1, 0.4, 1.0)]
+    assert valores[0] < valores[1] < valores[2]
+    assert valores[0] < 0.1
+    # una permutacion al azar no informa del ritmo y deja el CRE cerca de 1
+    assert cre(ref, ajuste_fmm(Y, rng.permutation(theta))) > 0.7
+
+
+def test_cre_no_depende_del_origen_ni_del_sentido():
+    """La familia FMM es cerrada bajo rotacion y reflexion del tiempo, asi
+    que no hace falta alinear la escala estimada. Queda una diferencia
+    minima porque la rejilla de alpha del ajuste es fija."""
+    from simulation.metrics import ajuste_fmm, cre
+    theta, Y, rng = _genes_fmm()
+    ref = ajuste_fmm(Y, theta)
+    est = (theta + rng.normal(0, 0.4, theta.size)) % TWO_PI
+    base = cre(ref, ajuste_fmm(Y, est))
+    assert cre(ref, ajuste_fmm(Y, (est + 2.1) % TWO_PI)) == pytest.approx(base, rel=1e-2)
+    assert cre(ref, ajuste_fmm(Y, (-est) % TWO_PI)) == pytest.approx(base, rel=1e-2)
+
+
+def test_cre_no_depende_de_la_escala_de_los_genes():
+    from simulation.metrics import cre
+    rng = np.random.default_rng(1)
+    a, b = rng.normal(size=(5, 30)), rng.normal(size=(5, 30))
+    assert cre(3.0 * a, 3.0 * b) == pytest.approx(cre(a, b))
+
+
+def test_cre_sin_senal_en_la_referencia_no_esta_definido():
+    from simulation.metrics import cre
+    assert np.isnan(cre(np.ones((3, 10)), np.zeros((3, 10))))
+    with pytest.raises(ValueError):
+        cre(np.zeros((3, 10)), np.zeros((3, 9)))
+
+
+def test_genes_ritmicos_toma_la_verdad_y_no_el_fondo():
+    import pandas as pd
+    from simulation.metrics import genes_ritmicos
+    # mismo formato que SimulationTruth.gene_params, indexado por gen
+    params = pd.DataFrame({"kind": ["core", "ritmico", "fondo", "ritmico"]},
+                          index=pd.Index(["A", "B", "C", "D"], name="gene"))
+    assert genes_ritmicos(params, ["A", "B", "C"]) == ["A", "B"]
+
+
+def test_cre_con_circafmm_usa_su_propio_modelo():
+    """Con CircaFMM las dos curvas del CRE salen de CircaFMM con la lambda
+    del pipeline: vale 0 con los tiempos verdaderos y crece al estropearlos."""
+    from simulation.metrics import ajuste_fmm, cre
+    theta, Y, rng = _genes_fmm()
+    ref = ajuste_fmm(Y, theta, "circafmm", lambda_star=1.0)
+    assert cre(ref, ajuste_fmm(Y, theta, "circafmm", lambda_star=1.0)) == 0.0
+    ruido = [cre(ref, ajuste_fmm(Y, (theta + rng.normal(0, s, theta.size)) % TWO_PI,
+                                 "circafmm", lambda_star=1.0)) for s in (0.1, 1.0)]
+    assert ruido[0] < ruido[1]
+    # y no es el FMM base: las curvas de referencia difieren
+    assert not np.allclose(ref, ajuste_fmm(Y, theta, "base"))
+
+
+def test_cre_con_circafmm_exige_la_lambda():
+    from simulation.metrics import ajuste_fmm
+    theta, Y, _ = _genes_fmm(g=2)
+    with pytest.raises(ValueError, match="lambda"):
+        ajuste_fmm(Y, theta, "circafmm")
+    with pytest.raises(ValueError, match="desconocido"):
+        ajuste_fmm(Y, theta, "otro")

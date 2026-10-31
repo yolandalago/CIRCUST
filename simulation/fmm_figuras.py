@@ -1,5 +1,5 @@
 """
-Figuras y tablas de la comparacion FMM base contra estabilizado.
+Figuras y tablas de la comparacion FMM base contra CircaFMM.
 
 El argumento del capitulo tiene cinco pasos y cada figura cubre uno:
 
@@ -29,7 +29,7 @@ parte, y no la principal. Lo que la descomposicion del error de omega muestra
   arriba, o sea hacia ondas mas suaves, siempre. Eso corrige al base cuando
   el base subestima (omega verdadero 0,9 con poca senal, sesgo -0,42 que pasa
   a -0,19) y lo estropea cuando el base ya era insesgado (omega verdadero
-  0,5, donde el base da -0,00 y el estabilizado +0,17).
+  0,5, donde el base da -0,00 y CircaFMM +0,17).
 
 O sea: se paga sesgo a cambio de varianza, y sale a cuenta solo mientras la
 varianza sea el termino dominante, que es cuando hay poca informacion. De ahi
@@ -82,9 +82,9 @@ from simulation.analyze import (
 )
 
 # Celdas del volcado por gen. Son pocas y elegidas a proposito:
-#   - (24, 1.0) es la esquina donde el estabilizado gana por goleada
+#   - (24, 1.0) es la esquina donde CircaFMM gana por goleada
 #   - (96, 4.0) es la esquina donde pierde
-#   - omega 0,1 es el regimen donde el estabilizado es peor
+#   - omega 0,1 es el regimen donde CircaFMM es peor
 # Con estas tres se cuenta la historia entera, y cuestan minutos.
 CELDAS_POR_GEN = (
     # (n, omega, snr, etiqueta). Niveles de la rejilla, para que las figuras
@@ -102,7 +102,7 @@ CELDAS_POR_GEN = (
 def cargar_pareado(entrada: Path | str,
                    metodo: str = METODO_REFERENCIA) -> pd.DataFrame:
     """
-    Une el brazo base con el estabilizado replica a replica.
+    Une el brazo base con CircaFMM replica a replica.
 
     La union es por identidad de generacion mas numero de replica, que es lo
     que garantiza que las dos filas corrieron sobre la MISMA matriz. Sin eso
@@ -114,9 +114,9 @@ def cargar_pareado(entrada: Path | str,
     d = d[(d["bloque"] == "rejilla") & (d["status"] == "ok")
           & (d["metodo"] == metodo)]
     b = d[d["fmm_method"] == "base"]
-    s = d[d["fmm_method"] == "stabilized"]
+    s = d[d["fmm_method"] == "circafmm"]
     if b.empty or s.empty:
-        raise ValueError("faltan filas de base o de estabilizado en la rejilla")
+        raise ValueError("faltan filas de base o de CircaFMM en la rejilla")
 
     clave = [c for c in CLAVE_PAREADA if c in d.columns]
     par = b.merge(s, on=clave, suffixes=("_b", "_s"))
@@ -151,7 +151,7 @@ def volcar_por_gen(destino: Path | str) -> pd.DataFrame:
                         amplitude=snr * SIGMA_BASE, sigma=SIGMA_BASE,
                         sampling="uniforme", seed=4242)
         X, truth = generate_dataset(cfg)
-        for metodo in ("base", "stabilized"):
+        for metodo in ("base", "circafmm"):
             r = run_full(X, truth, GCORE_CENTRAL, RobustConfig(n_reps=5),
                          fmm_method=metodo)
             g = per_gene_errors(r.atlas, truth.gene_params, quitar_giro=True)
@@ -181,7 +181,7 @@ def tabla_wilcoxon(par: pd.DataFrame,
     diferencias bajo la hipotesis nula.
 
     Se reporta ademas la **tasa de victorias**, que es la fraccion de
-    replicas en que el estabilizado gana. Es mas informativa que el p-valor:
+    replicas en que CircaFMM gana. Es mas informativa que el p-valor:
     un efecto mediano pequeno con el 100 % de victorias es una mejora mas
     solida que uno grande con el 55 %.
 
@@ -270,7 +270,7 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
     """
     A: efecto pareado sobre el RMSE de la curva, por n y A/sigma.
 
-    Azul (negativo) = gana el estabilizado. Se separan las ondas normales de
+    Azul (negativo) = gana CircaFMM. Se separan las ondas normales de
     omega=0,1 porque el signo del efecto se invierte entre las dos, que es
     justo el resultado.
     """
@@ -288,8 +288,8 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
                                  values="d_atlas_error_onda", aggfunc="median")
         im = _mapa(ax, t, tit, "RdBu_r", 0.0, vlim=lim)
     cb = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
-    cb.set_label("cambio en el error de la onda del atlas\n(estabilizado $-$ base)", fontsize=8)
-    fig.suptitle("Efecto del FMM estabilizado sobre el ajuste por gen\n"
+    cb.set_label("cambio en el error de la onda del atlas\n(CircaFMM $-$ base)", fontsize=8)
+    fig.suptitle("Efecto de CircaFMM sobre el ajuste por gen\n"
                  "azul = mejora, rojo = empeora", fontsize=10, y=1.04)
     fig.savefig(destino)
     plt.close(fig)
@@ -297,7 +297,7 @@ def figura_a_efecto(par: pd.DataFrame, destino: Path) -> None:
 
 def figura_b_victorias(par: pd.DataFrame, destino: Path) -> None:
     """
-    B: fraccion de replicas en que gana el estabilizado.
+    B: fraccion de replicas en que gana CircaFMM.
 
     Acompana a la A porque responde otra pregunta. La A dice cuanto mejora en
     mediana; esta dice con cuanta consistencia. Un efecto pequeno que se
@@ -313,13 +313,13 @@ def figura_b_victorias(par: pd.DataFrame, destino: Path) -> None:
     ]):
         t = (par[sel].assign(gana=lambda x: (x.d_atlas_error_onda < 0).astype(float))
              .pivot_table(index="n_samples", columns="snr", values="gana"))
-        # "RdBu" sin invertir: las fracciones altas, donde gana el
-        # estabilizado, salen en azul, con el mismo convenio que la figura A
+        # "RdBu" sin invertir: las fracciones altas, donde gana
+        # CircaFMM, salen en azul, con el mismo convenio que la figura A
         im = _mapa(ax, t, tit, "RdBu", 0.5, fmt="{:.2f}", vlim=0.5)
     cb = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
-    cb.set_label("fraccion de replicas\nen que gana el estabilizado", fontsize=8)
+    cb.set_label("fraccion de replicas\nen que gana CircaFMM", fontsize=8)
     fig.suptitle("Consistencia de la mejora, no solo su tamano\n"
-                 "azul = gana el estabilizado, 0,5 = empate", fontsize=10, y=1.04)
+                 "azul = gana CircaFMM, 0,5 = empate", fontsize=10, y=1.04)
     fig.savefig(destino)
     plt.close(fig)
 
@@ -343,7 +343,7 @@ def figura_c_pico_horas(par: pd.DataFrame, destino: Path) -> None:
     ax.set_xlabel("A/$\\sigma$")
     ax.set_ylabel("cambio en la variabilidad del error\nen la hora del pico (h)")
     ax.set_title("Cuanto mejora la localizacion del pico, en horas\n"
-                 "negativo = el estabilizado situa el pico con menos error", fontsize=9)
+                 "negativo = CircaFMM situa el pico con menos error", fontsize=9)
     ax.legend(frameon=False, fontsize=8)
     fig.savefig(destino)
     plt.close(fig)
@@ -385,7 +385,7 @@ def figura_d_sesgo_omega(par: pd.DataFrame, destino: Path) -> None:
             ax = axes[r, c]
             g = par[par.omega == w]
             for suf, nombre, color in (("_b", "base", "#c0392b"),
-                                       ("_s", "estabilizado", "#2471a3")):
+                                       ("_s", "CircaFMM", "#2471a3")):
                 m  = g.groupby("snr")[col + suf].median()
                 q1 = g.groupby("snr")[col + suf].quantile(0.25)
                 q3 = g.groupby("snr")[col + suf].quantile(0.75)
@@ -403,7 +403,7 @@ def figura_d_sesgo_omega(par: pd.DataFrame, destino: Path) -> None:
 
     axes[0, 0].legend(frameon=False, fontsize=8)
     fig.suptitle("El mecanismo: la varianza baja siempre, el sesgo cruza\n"
-                 "abajo el estabilizado gana en todas partes, arriba solo "
+                 "abajo CircaFMM gana en todas partes, arriba solo "
                  "cuando hay poca informacion", fontsize=10, y=0.99)
     fig.savefig(destino)
     plt.close(fig)
@@ -418,20 +418,20 @@ def figura_e_omega_por_gen(g: pd.DataFrame, destino: Path) -> None:
 
     - **n bajo, senal baja.** Con pocos puntos el FMM base tiene libertad para
       poner un pico estrechisimo entre dos observaciones, y la distribucion se
-      desparrama por todo el rango con masa contra el limite inferior. El
-      estabilizado se concentra en torno al valor verdadero. Mediana 0,41
+      desparrama por todo el rango con masa contra el limite inferior.
+      CircaFMM se concentra en torno al valor verdadero. Mediana 0,41
       contra 0,70, con omega verdadero 0,9.
     - **n alto, senal alta.** El base acierta de lleno, mediana 0,91 sobre un
-      valor verdadero de 0,9, y el estabilizado se desplaza a 0,94 con la
+      valor verdadero de 0,9, y CircaFMM se desplaza a 0,94 con la
       mitad de dispersion. Aqui la regularizacion apenas cambia nada.
-    - **onda muy apuntada.** El base vuelve a acertar, 0,13 sobre 0,1, y el
-      estabilizado se va a 0,57. Es el peor caso para la penalizacion, porque
+    - **onda muy apuntada.** El base vuelve a acertar, 0,13 sobre 0,1, y
+      CircaFMM se va a 0,57. Es el peor caso para la penalizacion, porque
       la rugosidad que castiga es aqui una propiedad real de la onda.
 
     Ojo al panel de la derecha: el amontonamiento del base contra el cero no
     es concentracion sino el suelo de la rejilla de omega, que trunca la
-    distribucion por abajo. Sobre el conjunto de la rejilla la dispersion del
-    estabilizado es menor tambien en omega = 0,1 (figura D), pero en esta
+    distribucion por abajo. Sobre el conjunto de la rejilla la dispersion de
+    CircaFMM es menor tambien en omega = 0,1 (figura D), pero en esta
     celda concreta, con solo veinte genes evaluables, no se aprecia. Esta
     figura sirve para ver la FORMA de cada fallo; la afirmacion cuantitativa
     sobre dispersion es la de la figura D, que tiene 10.000 pares detras.
@@ -446,7 +446,7 @@ def figura_e_omega_por_gen(g: pd.DataFrame, destino: Path) -> None:
     for ax, celda in zip(axes, celdas):
         sub = g[g.celda == celda]
         for metodo, nombre, color in (("base", "base", "#c0392b"),
-                                      ("stabilized", "estabilizado", "#2471a3")):
+                                      ("circafmm", "CircaFMM", "#2471a3")):
             ax.hist(sub[sub.metodo == metodo].omega_hat, bins=bins, alpha=0.55,
                     color=color, label=nombre, density=True)
         ax.axvline(sub.omega_true.iloc[0], color="black", lw=1.4,
@@ -457,7 +457,7 @@ def figura_e_omega_por_gen(g: pd.DataFrame, destino: Path) -> None:
     axes[0].legend(frameon=False, fontsize=7.5)
     fig.suptitle(
         "Los tres regimenes: donde falla el base (izquierda) y donde falla\n"
-        "el estabilizado (centro y derecha)", fontsize=10, y=1.02)
+        "CircaFMM (centro y derecha)", fontsize=10, y=1.02)
     fig.savefig(destino)
     plt.close(fig)
 
@@ -477,7 +477,7 @@ def figura_f_ondas(g: pd.DataFrame, destino: Path, n_genes: int = 3) -> None:
     celda = g.celda.iloc[0]
     sub = g[g.celda == celda]
     b = sub[sub.metodo == "base"].set_index("gene_name")
-    s = sub[sub.metodo == "stabilized"].set_index("gene_name")
+    s = sub[sub.metodo == "circafmm"].set_index("gene_name")
     comunes = b.index.intersection(s.index)
     discrepancia = (b.loc[comunes, "rmse_curva"] - s.loc[comunes, "rmse_curva"])
     elegidos = discrepancia.sort_values(ascending=False).index[:n_genes]
@@ -499,7 +499,7 @@ def figura_f_ondas(g: pd.DataFrame, destino: Path, n_genes: int = 3) -> None:
         ax.plot(horas, fb, color="#c0392b", lw=1.3, ls="--",
                 label=f"base ($\\omega$={b.loc[gen,'omega_hat']:.2f})")
         ax.plot(horas, fs, color="#2471a3", lw=1.3,
-                label=f"estab. ($\\omega$={s.loc[gen,'omega_hat']:.2f})")
+                label=f"CircaFMM ($\\omega$={s.loc[gen,'omega_hat']:.2f})")
         ax.set_title(gen, fontsize=8.5)
         ax.set_xlabel("hora del ciclo")
         ax.set_xticks([0, 6, 12, 18, 24])

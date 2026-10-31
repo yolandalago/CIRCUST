@@ -35,7 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 # Aceleracion en CPU. Compila con Numba la rejilla y el objetivo de
 # Nelder-Mead del FMM base, la base trigonometrica y el refinamiento del FMM
-# estabilizado, y los estimadores de agregacion circular. Sin Numba todo
+# CircaFMM, y los estimadores de agregacion circular. Sin Numba todo
 # funciona igual (mismos resultados a 1e-8) pero el FMM base tarda 2-3 veces
 # mas. Recomendado para cualquier uso real.
 accel = [

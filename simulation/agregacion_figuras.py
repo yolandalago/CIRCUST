@@ -20,14 +20,14 @@ Lo que dice la rejilla, medido sobre 16.200 pares por variante del FMM
 
 3. **La agregacion gana de forma consistente pero pequena.** Sobre el error
    del orden relativo, que mide el orden al margen del anclaje, gana en el
-   69 % de las replicas con el FMM base y en el 71 % con el estabilizado. La
+   69 % de las replicas con el FMM base y en el 71 % con CircaFMM. La
    mediana de la ganancia es de 0,03 h, y llega a 0,14 h con n = 96 y
    A/sigma = 1. Sobre el error de fase absoluta, que incluye el anclaje, la
    victoria baja al 55 %: el error de sincronizacion es comun a los dos
    brazos y tapa la diferencia.
 
-4. **La ganancia crece con n y al bajar la senal.** Es lo contrario del
-   FMM estabilizado, cuya ventaja se apaga al subir n. El consenso promedia
+4. **La ganancia crece con n y al bajar la senal.** Es lo contrario de
+   CircaFMM, cuya ventaja se apaga al subir n. El consenso promedia
    el ruido de particion de las K repeticiones, y ese ruido pesa mas cuando
    hay muchas muestras que ordenar y poca senal para hacerlo.
 
@@ -320,7 +320,7 @@ def main() -> None:
     tabla_identidades(df).to_csv(tablas / "agregacion_identidades.csv", index=False)
     print("  escrita agregacion_identidades.csv")
 
-    for fmm in ("base", "stabilized"):
+    for fmm in ("base", "circafmm"):
         par = cargar_contraste(entrada, fmm=fmm)
         print(f"  {len(par)} pares HODs contra {METODO_REFERENCIA} con FMM {fmm}")
         t = tabla_wilcoxon(par, medida=MEDIDA)

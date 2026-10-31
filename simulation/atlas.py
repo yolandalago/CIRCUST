@@ -1,11 +1,11 @@
 """
 Calidad del atlas: cuanto se parece la onda publicada por gen a la verdadera.
 
-Estas son las medidas del bloque de regularizacion. El FMM estabilizado no
+Estas son las medidas del bloque de regularizacion. CircaFMM no
 puede cambiar el orden de muestras, porque ese orden sale de una SVD sobre
 los genes nucleares donde el FMM no interviene en ningun paso. Lo que si
 cambia es la estimacion de los parametros gen a gen, y eso es exactamente lo
-que el atlas publica. Medir el orden para comparar base contra estabilizado
+que el atlas publica. Medir el orden para comparar base contra CircaFMM
 seria medir donde los dos metodos son identicos por construccion.
 
 Que se guarda y por que
@@ -22,7 +22,7 @@ ninguna es redundante:
 
     pico y valle   en horas, interpretables directamente
     subida         |error del pico - error del valle|, la forma de la onda
-    omega          el mecanismo por el que el estabilizado mejora
+    omega          el mecanismo por el que CircaFMM mejora
     R2             lo que el atlas declara de si mismo, sin usar la verdad
     VPP            de los genes del atlas, cuantos son ritmicos de verdad
 

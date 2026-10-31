@@ -363,8 +363,8 @@ def normalise_matrix(
     traves de la division por ``span``, arrasaba las demas celdas de ese gen,
     que eran validas. El gen sobrevivia entonces al filtro del 30 % de
     ``Preprocessor`` y moria en este paso: con el modelo FMM base su R2 salia
-    NaN y quedaba descartado en silencio por ``r2 >= umbral``, con el
-    estabilizado se lanzaba una excepcion, y si era un gen core el SVD
+    NaN y quedaba descartado en silencio por ``r2 >= umbral``, con
+    CircaFMM se lanzaba una excepcion, y si era un gen core el SVD
     del CPCA no convergia. La implementacion de referencia en R arrastra el
     mismo comportamiento en ``normalice2``.
 
@@ -426,19 +426,6 @@ class Preprocessor:
         Fraccion de muestras que pueden ser cero o NaN antes de que un gen
         se elimine. La comparacion es estricta (>), asi que un gen
         exactamente en el umbral se conserva.
-
-    impute_strategy : str
-        Que hacer con los valores ausentes de los genes que superan el filtro
-        de dispersion.
-
-        ``"median"`` (defecto)
-            Sustituirlos por la mediana de los valores observados del gen. Se
-            usa la mediana y no la media porque es robusta a los valores
-            extremos, frecuentes en expresion genica.
-        ``"drop"``
-            Eliminar el gen entero. Equivale a exigir un 0 % de valores
-            ausentes y hace inoperante la tolerancia de ``sparse_threshold``
-            sobre los NaN.
 
     zero_threshold : float o None
         Override para el umbral solo de ceros. Si None (defecto), usa

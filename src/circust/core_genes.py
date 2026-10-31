@@ -61,23 +61,6 @@ SEED_GENES_ZHANG: list[str] = [
     "USP2", "TSC22D3", "TSPAN4",
 ]
 
-# Ruben et al. (2018), los 54 genes de ciclado ubicuo en humano.
-#
-# Fuente: material suplementario de la publicacion, hoja
-# ``DatafileS2_HumanUbiquitousCycle`` de
-# ``data/NIHMS1725947-supplement-File_S2 54 cores.xlsx``. Son los genes que
-# ciclan en al menos 8 de los 13 tejidos del atlas. El orden es el del propio
-# fichero, por numero de tejidos en los que ciclan.
-#
-# La lista se transcribe aqui y no se lee del Excel en tiempo de ejecucion para
-# que importar este modulo no dependa de un fichero de datos ni de openpyxl, y
-# para que quede versionada y a la vista.
-#
-# AVISO: este conjunto no contiene CRY1, que es el gen de consistencia por
-# defecto de la etapa de sincronizacion. Con el conjunto de Ruben esa
-# verificacion se queda sin tercer gen y, segun la regla, invierte la
-# orientacion por defecto cuando se produce un aviso. ``CircularSynchronizer``
-# lo notifica por consola cuando ocurre.
 SEED_GENES_RUBEN: list[str] = [
     "DBP", "NR1D2", "CIART", "CRY2", "GSTM2", "PER2", "PER3", "TEF", "ARNTL",
     "FAM76A", "HLF", "BHLHE41", "IL11RA", "LDB1", "TCEA3", "TRIM45",

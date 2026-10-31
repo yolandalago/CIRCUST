@@ -53,8 +53,7 @@ from typing import Optional
 
 from circust.core_genes import SEED_GENES_DEFAULT
 from circust.fitting.fmm            import FMMModel
-from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
-from circust.fitting.cosinor import CosinorModel
+from circust.fitting.circafmm import CircaFMMModel, prepare_dataset
 from circust.fitting.cyclic_spline import fit_cyclic_spline_residuals
 from circust.fitting.rhythm_model import FitResult
 from circust.preprocessing import normalise_matrix
@@ -94,9 +93,6 @@ class CPCAResult:
     fmm_fits_final : dict[str, FitResult]
         Ajustes FMM sobre genes core usando el ordenamiento final.
 
-    fmm_peak_times_final : dict[str, float]
-        Tiempos de pico FMM (via compUU) para cada gen core (final).
-
     samples_dropped : list[int]
         Indices originales de columna de las muestras eliminadas.
 
@@ -109,20 +105,9 @@ class CPCAResult:
     pc1, pc2, pc3 : np.ndarray
         Loadings de PC1/PC2/PC3 del CPCA final (un valor por muestra).
 
-    std_residuals_fmm : pd.DataFrame o None
-        Residuos FMM estandarizados (genes+PCs x muestras, orden inicial).
-        Solo para diagnostico/visualizacion, YA NO se usa para detectar
-        outliers (eso lo hace std_residuals_spline).
-
     std_residuals_spline : pd.DataFrame o None
         Residuos estandarizados del spline periodico por gen core (orden
         inicial). Es lo que realmente usa la deteccion de outliers.
-
-    fmm_fits_initial : dict[str, FitResult]
-        Ajustes FMM sobre genes core + PC1/PC2/PC3 en orden CPCA inicial.
-
-    cosinor_fits_initial : dict[str, FitResult]
-        Ajustes Cosinor sobre genes core + PC1/PC2/PC3 en orden inicial.
     """
 
     # ── Pipeline ─────────────────────────────────────────────────────────
@@ -133,7 +118,6 @@ class CPCAResult:
     expr_norm_final:       pd.DataFrame
     core_norm_final:       pd.DataFrame
     fmm_fits_final:        dict
-    fmm_peak_times_final:  dict
     samples_dropped:       list[int]   = field(default_factory=list)
     spline_outliers:       list[int]   = field(default_factory=list)
 
@@ -141,14 +125,11 @@ class CPCAResult:
     pc1:                   np.ndarray                = field(default_factory=lambda: np.array([]))
     pc2:                   np.ndarray                = field(default_factory=lambda: np.array([]))
     pc3:                   np.ndarray                = field(default_factory=lambda: np.array([]))
-    std_residuals_fmm:     Optional[pd.DataFrame]    = None
     std_residuals_spline:  Optional[pd.DataFrame]    = None
-    fmm_fits_initial:      dict                      = field(default_factory=dict)
-    cosinor_fits_initial:  dict                      = field(default_factory=dict)
     pc1_initial:           np.ndarray                = field(default_factory=lambda: np.array([]))
     pc2_initial:           np.ndarray                = field(default_factory=lambda: np.array([]))
 
-    # ── FMM estabilizado: lambda calibrado, propagable a etapas siguientes ──
+    # ── CircaFMM: lambda calibrado, propagable a etapas siguientes ──
     lambda_star:           Optional[float]           = None
 
     def summary(self) -> str:
@@ -228,19 +209,19 @@ class CPCA:
 
     fmm_method : str
         ``"base"`` (default) usa ``FMMModel`` (RSS + Nelder-Mead).
-        ``"stabilized"`` usa ``StabilizedFMMModel`` (criterio de potencia
+        ``"circafmm"`` usa ``CircaFMMModel`` (criterio de potencia
         penalizado por rugosidad, pesos por densidad temporal). Cuando es
-        ``"stabilized"``, los parametros ``fmm_length_*`` y ``fmm_num_reps``
-        se ignoran y se usan los defaults del estabilizado o los pasados via
-        ``fmm_stab_kwargs``.
+        ``"circafmm"``, los parametros ``fmm_length_*`` y ``fmm_num_reps``
+        se ignoran y se usan los defaults de CircaFMM o los pasados via
+        ``circafmm_kwargs``.
 
-    fmm_stab_kwargs : dict, opcional
+    circafmm_kwargs : dict, opcional
         Parametros adicionales para ``prepare_dataset`` cuando
-        ``fmm_method="stabilized"`` (ej: ``n_simulations``, ``n_repeats``).
+        ``fmm_method="circafmm"`` (ej: ``n_simulations``, ``n_repeats``).
 
     fmm_refine : bool
-        Activa el refinamiento local opcional de ``(alpha, omega)`` del FMM
-        estabilizado (Seccion S3.4.4, Algoritmo S2 del suplemento de
+        Activa el refinamiento local opcional de ``(alpha, omega)`` de
+        CircaFMM (Seccion S3.4.4, Algoritmo S2 del suplemento de
         CircaFMM). Por defecto False, como en ``runCircaFMM.R``. Se ignora con
         ``fmm_method="base"``.
 
@@ -275,15 +256,15 @@ class CPCA:
         fmm_length_omega_grid:    int       = 24,
         fmm_num_reps:             int       = 3,
         fmm_method:               str       = "base",
-        fmm_stab_kwargs:          dict|None = None,
+        circafmm_kwargs:          dict|None = None,
         fmm_refine:               bool      = False,
         compute_fmm_fits:         bool      = True,
         verbose:                  bool      = True,
     ) -> None:
-        if fmm_method not in ("base", "stabilized"):
-            raise ValueError(f"fmm_method debe ser 'base' o 'stabilized', recibido: {fmm_method!r}")
+        if fmm_method not in ("base", "circafmm"):
+            raise ValueError(f"fmm_method debe ser 'base' o 'circafmm', recibido: {fmm_method!r}")
         self.core_genes               = core_genes if core_genes is not None else SEED_GENES_DEFAULT
-        # compute_fmm_fits=False salta el ajuste FMM/Cosinor (initial+final) y
+        # compute_fmm_fits=False salta el ajuste FMM final de los genes core y
         # la deteccion de outliers. Solo valido cuando al llamante le basta con
         # sample_order/circular_scale (vienen de la descomposicion CPCA, no del
         # FMM) y no elimina outliers (max_outlier_fraction=0). Lo usa
@@ -306,36 +287,36 @@ class CPCA:
         self.fmm_length_omega_grid    = fmm_length_omega_grid
         self.fmm_num_reps             = fmm_num_reps
         self.fmm_method               = fmm_method
-        self.fmm_stab_kwargs          = fmm_stab_kwargs or {}
+        self.circafmm_kwargs          = circafmm_kwargs or {}
         self.fmm_refine               = fmm_refine
         self.verbose                  = verbose
 
-        # Lambda calibrado en _fit_initial; se reutiliza en _fit_final y se
-        # expone en CPCAResult.lambda_star para etapas posteriores del pipeline.
+        # Lambda calibrado en _fit_final (primera llamada a _make_fmm_model) y
+        # expuesto en CPCAResult.lambda_star para etapas posteriores del pipeline.
         self._cached_lambda_star: Optional[float] = None
 
     def _make_fmm_model(self, times: np.ndarray):
         """Factory interno: construye el modelo FMM segun ``fmm_method``.
 
-        Para ``"stabilized"``, calibra lambda solo en la primera llamada
-        (en ``_fit_initial``) y lo cachea para reusarlo en ``_fit_final``.
-        Si el usuario ya proporciono ``lambda_star`` en ``fmm_stab_kwargs``,
+        Para ``"circafmm"``, calibra lambda solo en la primera llamada
+        (en ``_fit_final``) y lo cachea para exponerlo en ``CPCAResult``.
+        Si el usuario ya proporciono ``lambda_star`` en ``circafmm_kwargs``,
         salta la calibracion automatica desde el inicio.
         """
-        if self.fmm_method == "stabilized":
-            stab_kwargs = dict(self.fmm_stab_kwargs)
+        if self.fmm_method == "circafmm":
+            circafmm_kwargs = dict(self.circafmm_kwargs)
 
             # Si ya hay un lambda cacheado (segunda+ llamada), reusarlo
-            if self._cached_lambda_star is not None and "lambda_star" not in stab_kwargs:
-                stab_kwargs["lambda_star"] = self._cached_lambda_star
+            if self._cached_lambda_star is not None and "lambda_star" not in circafmm_kwargs:
+                circafmm_kwargs["lambda_star"] = self._cached_lambda_star
 
-            prepared = prepare_dataset(times, **stab_kwargs)
+            prepared = prepare_dataset(times, **circafmm_kwargs)
 
             # Cachear la primera vez (o si el usuario forzo un lambda concreto)
             if self._cached_lambda_star is None:
                 self._cached_lambda_star = float(prepared.lambda_star)
 
-            return StabilizedFMMModel(prepared=prepared, refine=self.fmm_refine)
+            return CircaFMMModel(prepared=prepared, refine=self.fmm_refine)
         return FMMModel(
             length_alpha_grid = self.fmm_length_alpha_grid,
             length_omega_grid = self.fmm_length_omega_grid,
@@ -376,18 +357,16 @@ class CPCA:
         )
         self._log(f"  Outliers radiales CPCA (LEi < {self.tight_radius}): {len(outlier_idx)}")
 
-        # ── Paso 3: ajuste FMM + Cosinor en orden inicial ────────────────
+        # ── Paso 3: spline en orden inicial + deteccion de outliers ──────
         # Atajo: si no se piden los ajustes FMM (compute_fmm_fits=False), se
-        # saltan _fit_initial + deteccion de outliers + _fit_final. Solo es
+        # salta la deteccion de outliers + _fit_final. Solo es
         # valido cuando al llamante le basta sample_order/circular_scale y no
         # se eliminan outliers; sample_order/circular_scale no dependen del FMM.
         if not self.compute_fmm_fits:
-            fmm_fits_ini, cos_fits_ini, std_res_df = {}, {}, None
             cpca_outs, spline_outs, all_dropped = [], [], []
             pc1_initial, pc2_initial = pc1.copy(), pc2.copy()
             core_norm_clean = core_matrix
             expr_norm_final = self._order_full_matrix(expr_norm, all_dropped, sample_order)
-            fmm_fits_fin, fmm_peaks_fin = {}, {}
             result = CPCAResult(
                 sample_order         = sample_order,
                 circular_scale       = circular_scale,
@@ -395,17 +374,13 @@ class CPCA:
                 variance_explained   = var_exp,
                 expr_norm_final      = expr_norm_final,
                 core_norm_final      = core_norm_clean.iloc[:, sample_order],
-                fmm_fits_final       = fmm_fits_fin,
-                fmm_peak_times_final = fmm_peaks_fin,
+                fmm_fits_final       = {},
                 samples_dropped      = list(all_dropped),
                 spline_outliers      = spline_outs,
                 pc1                  = pc1,
                 pc2                  = pc2,
                 pc3                  = pc3,
-                std_residuals_fmm    = std_res_df,
                 std_residuals_spline = None,
-                fmm_fits_initial     = fmm_fits_ini,
-                cosinor_fits_initial = cos_fits_ini,
                 pc1_initial          = pc1_initial,
                 pc2_initial          = pc2_initial,
                 lambda_star          = self._cached_lambda_star,
@@ -413,12 +388,6 @@ class CPCA:
             return result
 
         self._log("=== Etapa 1.2: Deteccion de Outliers ===")
-        self._log("  Ajustando FMM y Cosinor en genes core (orden inicial, diagnostico) ...")
-        fmm_fits_ini, cos_fits_ini, std_res_df = self._fit_initial(
-            core_matrix, genes_found, sample_order, circular_scale,
-            pc1, pc2, pc3,
-        )
-
         self._log("  Ajustando spline periodico en genes core (deteccion, independiente de FMM) ...")
         std_res_spline_df = self._fit_spline_initial(
             core_matrix, genes_found, sample_order, circular_scale,
@@ -454,7 +423,7 @@ class CPCA:
 
         # ── Paso 7: ajuste FMM final sobre genes core ─────────────────────
         self._log("  Ajustando FMM en genes core (orden final) ...")
-        fmm_fits_fin, fmm_peaks_fin = self._fit_final(
+        fmm_fits_fin = self._fit_final(
             expr_norm_final, genes_found, circular_scale,
         )
 
@@ -466,17 +435,13 @@ class CPCA:
             expr_norm_final      = expr_norm_final,
             core_norm_final      = core_norm_clean.iloc[:, sample_order],
             fmm_fits_final       = fmm_fits_fin,
-            fmm_peak_times_final = fmm_peaks_fin,
             samples_dropped      = list(all_dropped),
             spline_outliers      = spline_outs,
             # diagnostico
             pc1                  = pc1,
             pc2                  = pc2,
             pc3                  = pc3,
-            std_residuals_fmm    = std_res_df,
             std_residuals_spline = std_res_spline_df,
-            fmm_fits_initial     = fmm_fits_ini,
-            cosinor_fits_initial = cos_fits_ini,
             pc1_initial          = pc1_initial,
             pc2_initial          = pc2_initial,
             lambda_star          = self._cached_lambda_star,
@@ -559,64 +524,12 @@ class CPCA:
         else:
             loose_mask  = norm12 <= self.loose_radius
             outlier_idx = np.where(loose_mask)[0]
+        # De menor a mayor norma: si hay mas candidatas que el tope de
+        # _detect_outliers, se quedan las mas proximas al origen y no las de
+        # menor indice de columna.
+        outlier_idx = outlier_idx[np.argsort(norm12[outlier_idx], kind="stable")]
 
         return sample_order, circular_scale, pc1, pc2, pc3, var_exp, outlier_idx
-
-    def _fit_initial(
-        self,
-        core_matrix:   pd.DataFrame,
-        genes_found:   list[str],
-        sample_order:  np.ndarray,
-        circular_scale: np.ndarray,
-        pc1: np.ndarray,
-        pc2: np.ndarray,
-        pc3: np.ndarray,
-    ) -> tuple[dict, dict, pd.DataFrame]:
-        """
-        Ajusta FMM y Cosinor en genes core + eigengenes (PC1/PC2/PC3)
-        usando el ordenamiento CPCA inicial.
-
-        Returns
-        -------
-        fmm_fits   : {nombre: FitResult}
-        cos_fits   : {nombre: FitResult}
-        std_res_df : DataFrame (senales x muestras) de residuos estandarizados
-        """
-        cm_vals = core_matrix.values
-
-        signals: dict[str, np.ndarray] = {}
-        for i, gene in enumerate(genes_found):
-            signals[gene] = cm_vals[i, sample_order]
-        signals["PC1"] = pc1[sample_order]
-        signals["PC2"] = pc2[sample_order]
-        signals["PC3"] = pc3[sample_order]
-
-        fmm_model = self._make_fmm_model(circular_scale)
-        cos_model = CosinorModel()
-
-        fmm_fits:      dict[str, FitResult] = {}
-        cos_fits:      dict[str, FitResult] = {}
-        std_res_rows:  list[np.ndarray]     = []
-        signal_names:  list[str]            = []
-
-        n_total = len(signals)
-        for idx, (name, data) in enumerate(signals.items(), 1):
-            self._log(f"    [{idx}/{n_total}] {name}", end="\r")
-            fr = fmm_model.fit(data, circular_scale)
-            cr = cos_model.fit(data, circular_scale)
-            fmm_fits[name] = fr
-            cos_fits[name] = cr
-            std_res_rows.append(fr.residuals_std)
-            signal_names.append(name)
-
-        self._log(f"    Ajuste completado: {n_total} senales.           ")
-
-        std_res_df = pd.DataFrame(
-            np.vstack(std_res_rows),
-            index   = signal_names,
-            columns = np.arange(len(circular_scale)),
-        )
-        return fmm_fits, cos_fits, std_res_df
 
     def _fit_spline_initial(
         self,
@@ -671,6 +584,11 @@ class CPCA:
              supera spline_gene_threshold; la muestra se declara atipica si
              es candidata en >= spline_outlier_fraction de los genes core.
 
+        Si hay mas candidatas que el tope ``max_outlier_fraction``, se
+        eliminan las mas atipicas: las radiales de menor norma y, despues, las
+        del spline con mayor fraccion de genes que las marcan (a igualdad,
+        mayor residuo medio absoluto).
+
         Returns
         -------
         cpca_outs   : eliminados por criterio radial (vacio si esta desactivado)
@@ -698,11 +616,17 @@ class CPCA:
         core_res      = std_res_spline_df.loc[genes_found].values  # (n_genes, n_samples)
         per_gene_flag = np.abs(core_res) > self.spline_gene_threshold
         frac_flagged  = per_gene_flag.mean(axis=0)
+        mean_abs_res  = np.abs(core_res).mean(axis=0)
 
-        spline_cands: list[int] = [
-            int(sample_order[pos])
-            for pos in np.where(frac_flagged >= self.spline_outlier_fraction)[0]
-        ]
+        # Candidatas de mas a menos atipicas: primero la fraccion de genes que
+        # las marcan y, a igualdad, el residuo medio absoluto en los genes core.
+        # Antes se recorrian en el orden circular, de modo que, si habia mas
+        # candidatas que el tope, se eliminaban las mas proximas al origen del
+        # circulo y no las mas atipicas.
+        pos_cands = np.where(frac_flagged >= self.spline_outlier_fraction)[0]
+        pos_cands = pos_cands[np.lexsort((-mean_abs_res[pos_cands],
+                                          -frac_flagged[pos_cands]))]
+        spline_cands: list[int] = [int(sample_order[pos]) for pos in pos_cands]
 
         # Union OR con tope (chequea ANTES de agregar para que cap=0 elimine 0)
         seen:       set[int]  = set()
@@ -746,19 +670,17 @@ class CPCA:
         expr_norm_final: pd.DataFrame,
         genes_found:     list[str],
         circular_scale:  np.ndarray,
-    ) -> tuple[dict, dict]:
+    ) -> dict[str, FitResult]:
         """
         Ajusta FMM en cada gen core con el ordenamiento final.
 
         Returns
         -------
         fmm_fits_final : {gen: FitResult}
-        peak_times     : {gen: float}
         """
         fmm_model = self._make_fmm_model(circular_scale)
 
         fmm_fits: dict[str, FitResult] = {}
-        peaks:    dict[str, float]     = {}
 
         n_total = len(genes_found)
         for idx, gene in enumerate(genes_found, 1):
@@ -769,10 +691,9 @@ class CPCA:
             data = expr_norm_final.loc[gene].values
             fr   = fmm_model.fit(data, circular_scale)
             fmm_fits[gene] = fr
-            peaks[gene]    = fr.peak_time
 
         self._log(f"    Ajuste final completado: {len(fmm_fits)} genes core.  ")
-        return fmm_fits, peaks
+        return fmm_fits
 
     # -----------------------------------------------------------------------
     # Utilidades

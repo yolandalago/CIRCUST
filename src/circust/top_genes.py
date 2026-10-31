@@ -37,7 +37,7 @@ from math import pi
 
 from circust.fitting.ori import ORIModel
 from circust.fitting.fmm            import FMMModel
-from circust.fitting.fmm_stabilized import StabilizedFMMModel, prepare_dataset
+from circust.fitting.circafmm import CircaFMMModel, prepare_dataset
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -270,16 +270,16 @@ def _fit_fmm_one(
             fr.params["M"], fr.params["alpha"], fr.params["beta"])
 
 
-def _fit_fmm_one_stab(
+def _fit_fmm_one_circafmm(
     row:      np.ndarray,
     circ:     np.ndarray,
-    stab_model: StabilizedFMMModel,
+    circafmm_model: CircaFMMModel,
 ) -> tuple[float, float, float, float, float, float, float]:
-    """Ajusta FMM estabilizado reusando un ``StabilizedFMMModel`` ya preparado.
+    """Ajusta CircaFMM reusando un ``CircaFMMModel`` ya preparado.
 
     Mismo formato de salida que :func:`_fit_fmm_one`.
     """
-    fr = stab_model.fit(row, circ)
+    fr = circafmm_model.fit(row, circ)
     return (fr.peak_time, fr.params["omega"], fr.r2, fr.params["A"],
             fr.params["M"], fr.params["alpha"], fr.params["beta"])
 
@@ -326,13 +326,6 @@ class TopGeneResult:
         por si solos). Se excluyen del pool de muestreo aleatorio
         en ``RandomSelector``.
 
-    coverage_genes : list[str]
-        Siempre vacio: la regla de cobertura ya no fuerza ningun gen que no
-        supere ``omega_min``/``r2_fmm_threshold`` (ver docstring de
-        ``_select_top_indices``). Se mantiene el campo por compatibilidad
-        con ``RandomSelector``, que lo excluye del pool de muestreo si
-        alguna vez volviera a poblarse.
-
     sample_order : np.ndarray int (n_muestras,)
         Orden de muestras del sincronizado preliminar.
 
@@ -364,7 +357,6 @@ class TopGeneResult:
     candidate_matrix: pd.DataFrame  = field(default_factory=pd.DataFrame)
     circular_scale:   np.ndarray    = field(default_factory=lambda: np.array([]))
     added_genes:      list          = field(default_factory=list)
-    coverage_genes:   list          = field(default_factory=list)
     sample_order:     np.ndarray    = field(default_factory=lambda: np.array([], dtype=int))
 
     # Diagnostico
@@ -409,10 +401,12 @@ class TopGeneSelector:
     3. Ajustar FMM a los supervivientes.
     4. Filtrar: omega > ``omega_min`` (0.1) Y R2_FMM >= ``r2_fmm_threshold`` (0.5).
     5. Repartir los picos FMM en ``n_sectors`` sectores y quedarse, dentro de
-       cada uno, con los de mayor R2_FMM hasta completar ``target_size``.
+       cada uno, con los de mayor R2_FMM hasta completar el cupo, que es la
+       fraccion ``top_fraction`` del total de genes de la matriz.
     6. Forzar inclusion de los genes core si no estan presentes.
     7. Construir la matriz TOP ([X_TOP] en el paper).
 
+    Revision antes de publicar
     Los umbrales del paso 2 y 4 son los que fija el paper (0.5, 0.5, 0.1) y no
     controlan el tamano del conjunto: con pocas muestras un FMM de 5 parametros
     supera R2 > 0.5 en buena parte del transcriptoma. El tamano lo fija el cupo
@@ -420,7 +414,7 @@ class TopGeneSelector:
     (Fig B, pasos 3.2-3.4: dividir el circulo en intervalos, recorrer cada uno
     por R2 decreciente y quedarse con los de mayor R2_FMM del tejido). El
     articulo describe esa construccion pero no cuantifica ni cuantos intervalos
-    ni cuantos genes, de ahi que ``n_sectors`` y ``target_size`` sean los dos
+    ni cuantos genes, de ahi que ``n_sectors`` y ``top_fraction`` sean los dos
     parametros a calibrar.
 
     Parameters
@@ -443,36 +437,31 @@ class TopGeneSelector:
         detectar sectores sin ningun gen ritmico (se avisa por consola, no se
         rellena con un gen que no supere omega_min/r2_fmm_threshold, ver
         docstring de ``_select_top_indices``) y estratificar el cupo de
-        ``target_size``.
+        el cupo.
 
         El texto principal del paper exige cubrir los cuatro cuadrantes, de
-        modo que 4 es el minimo admisible; el esquema del suplementario habla
-        de "a wide number of intervals" sin concretar y la implementacion de
-        referencia usa 8, que es el valor por defecto aqui. El techo lo impone
-        el numero de muestras: no se pueden exigir mas sectores que picos
-        distinguibles haya.
+        modo que 4 es el minimo admisible. Por defecto 8.
 
-    target_size : int | None
-        Numero objetivo de genes del conjunto TOP. El cupo se reparte entre los
-        sectores no vacios y dentro de cada uno se ordena por R2_FMM
-        descendente. El reparto por sectores, y no un ranking global, evita que
-        el cupo deshaga la cobertura: un ranking global tiende a concentrarse
-        en la region del ciclo donde la senal es mas fuerte.
+    top_fraction : float
+        Fraccion, en (0, 1], del numero total de genes de la matriz que se
+        retiene en el conjunto TOP: el cupo es ``round(top_fraction * n_total)``
+        y nunca baja de ``n_sectors``. Solo se retiene esa fraccion, no todos
+        los genes que superan los filtros (si son menos que el cupo se
+        conservan todos). El cupo se reparte entre los sectores no vacios y
+        dentro de cada uno se ordena por R2_FMM descendente. El reparto por
+        sectores, y no un ranking global, evita que el cupo deshaga la
+        cobertura: un ranking global tiende a concentrarse en la region del
+        ciclo donde la senal es mas fuerte.
 
         Los genes core forzados (paso 6) se anaden *despues*, igual que en la
-        implementacion de referencia, de modo que el tamano final es
-        ``target_size`` mas los core que no hubiesen entrado por si solos.
-
-        Si es None se conservan todos los genes que superan los filtros. Es el
-        comportamiento previo y NO es recomendable: sin cupo el conjunto crece
-        a miles de genes y las repeticiones de la etapa 4 se calculan sobre
-        ruido.
+        implementacion de referencia, de modo que el tamano final es el cupo
+        mas los core que no hubiesen entrado por si solos.
 
     fmm_length_alpha_grid, fmm_length_omega_grid, fmm_num_reps : int
         Parametros de la rejilla de ajuste FMM.
 
     fmm_refine : bool
-        Refinamiento local opcional de ``(alpha, omega)`` del FMM estabilizado
+        Refinamiento local opcional de ``(alpha, omega)`` de CircaFMM
         (Seccion S3.4.4 del suplemento de CircaFMM). Por defecto False. Se
         ignora con ``fmm_method="base"``.
 
@@ -490,19 +479,19 @@ class TopGeneSelector:
         r2_fmm_threshold:      float = 0.5,
         omega_min:             float = 0.1,
         n_sectors:             int   = 8,
-        target_size:           Optional[int] = 100,
+        top_fraction:          float = 0.1,
         fmm_length_alpha_grid: int   = 48,
         fmm_length_omega_grid: int   = 24,
         fmm_num_reps:          int   = 3,
         fmm_method:            str   = "base",
-        fmm_stab_kwargs:       dict|None = None,
+        circafmm_kwargs:       dict|None = None,
         lambda_star:           Optional[float] = None,
         fmm_refine:            bool  = False,
         n_jobs:                int   = -1,
         verbose:               bool  = True,
     ) -> None:
-        if fmm_method not in ("base", "stabilized"):
-            raise ValueError(f"fmm_method debe ser 'base' o 'stabilized', recibido: {fmm_method!r}")
+        if fmm_method not in ("base", "circafmm"):
+            raise ValueError(f"fmm_method debe ser 'base' o 'circafmm', recibido: {fmm_method!r}")
         self.r2_ori_threshold      = r2_ori_threshold
         self.r2_fmm_threshold      = r2_fmm_threshold
         self.omega_min             = omega_min
@@ -512,22 +501,20 @@ class TopGeneSelector:
                 f"cubran los cuatro cuadrantes. Recibido: {n_sectors!r}"
             )
         self.n_sectors             = n_sectors
-        if target_size is not None and target_size < n_sectors:
+        if not 0.0 < top_fraction <= 1.0:
             raise ValueError(
-                f"target_size ({target_size}) no puede ser menor que n_sectors "
-                f"({n_sectors}): cada sector necesita al menos una plaza para "
-                "no romper la cobertura circular."
+                f"top_fraction debe estar en (0, 1]. Recibido: {top_fraction!r}"
             )
-        self.target_size           = target_size
+        self.top_fraction          = top_fraction
         self.fmm_length_alpha_grid = fmm_length_alpha_grid
         self.fmm_length_omega_grid = fmm_length_omega_grid
         self.fmm_num_reps          = fmm_num_reps
         self.fmm_method            = fmm_method
-        # Si se proporciona lambda_star, lo inyectamos en stab_kwargs para
+        # Si se proporciona lambda_star, lo inyectamos en circafmm_kwargs para
         # saltar la calibracion (es lo que hace el pipeline tras heredarlo de CPCA)
-        self.fmm_stab_kwargs       = dict(fmm_stab_kwargs or {})
-        if lambda_star is not None and "lambda_star" not in self.fmm_stab_kwargs:
-            self.fmm_stab_kwargs["lambda_star"] = float(lambda_star)
+        self.circafmm_kwargs       = dict(circafmm_kwargs or {})
+        if lambda_star is not None and "lambda_star" not in self.circafmm_kwargs:
+            self.circafmm_kwargs["lambda_star"] = float(lambda_star)
         self.fmm_refine            = fmm_refine
         self.n_jobs                = n_jobs
         self.verbose               = verbose
@@ -542,7 +529,6 @@ class TopGeneSelector:
         circular_scale:  np.ndarray,
         seed_genes:      list[str],
         sample_order:    np.ndarray | None = None,
-        fit_cache:       dict | None = None,
     ) -> TopGeneResult:
         """
         Selecciona los genes TOP.
@@ -569,24 +555,10 @@ class TopGeneSelector:
             Indices de muestra del ordenamiento preliminar.
             Si es None se asume identidad.
 
-        fit_cache : dict o None
-            ANDAMIAJE TEMPORAL de calibracion, ver ``TODO(calibracion)`` mas
-            abajo. Diccionario, propiedad del llamante y asociado a un unico
-            tejido, donde se guardan los ajustes ORI y FMM para reutilizarlos
-            entre llamadas. Si es None (defecto, y unico modo usado por el
-            pipeline) no se cachea nada.
-
         Returns
         -------
         TopGeneResult
         """
-        # dict.fromkeys en vez de set(): preserva el orden y evita que un
-        # gen semilla duplicado (p.ej. --core-genes con un nombre repetido)
-        # se fuerce dos veces mas abajo, duplicando su fila en acc_names.
-        # Con set() el orden cambia en cada proceso, porque el hash de las
-        # cadenas esta aleatorizado, y eso reordena las filas del conjunto TOP.
-        # La Etapa 4 muestrea por indice sobre ese conjunto, de modo que la
-        # misma semilla acababa eligiendo genes distintos en cada ejecucion.
         seed_genes = list(dict.fromkeys(seed_genes))
         self._log("=== Etapa 3: Seleccion de Genes TOP ===")
 
@@ -598,72 +570,36 @@ class TopGeneSelector:
         if sample_order is None:
             sample_order = np.arange(expr_norm.shape[1], dtype=int)
 
-        # ══════════════════════════════════════════════════════════════
-        # TODO(calibracion): ELIMINAR `fit_cache` — de aqui y de la firma de
-        # run(), del docstring y del script validation/sweep_top.py — en
-        # cuanto (n_sectors, target_size) queden fijados en la memoria.
-        # No forma parte del metodo. Existe solo porque los ajustes ORI y FMM
-        # dependen unicamente del tejido y de los umbrales, nunca de
-        # n_sectors ni de target_size, de modo que barrer configuraciones
-        # sobre un mismo tejido repetiria ese trabajo identico una y otra vez.
-        # La clave incluye todo lo que sí puede alterar los ajustes, para que
-        # una reutilizacion indebida no pase inadvertida.
-        # ══════════════════════════════════════════════════════════════
-        clave = (
-            self.r2_ori_threshold, self.fmm_method,
-            self.fmm_length_alpha_grid, self.fmm_length_omega_grid,
-            self.fmm_num_reps,
+        # ── 1. Ajuste ORI (regresion isotonica circular unimodal) ──
+        self._log(f"  Genes totales: {n_total}")
+        self._log("  Ajustando ORI (PAVA unimodal) ...")
+
+        r2_ori = self._fit_ori_batch(values, circ)
+
+        # ── 2. Filtro R2_ORI ───────────────────────────────────────
+        self._log(
+            f"  Filtro R2_ORI >= {self.r2_ori_threshold} ..."
         )
-        cacheado = fit_cache.get(clave) if fit_cache is not None else None
 
-        if cacheado is not None:
-            (r2_ori, surv_genes, surv_r2_ori, surv_rows,
-             fmm_peaks_all, fmm_omega_all, fmm_r2_all, stab_model) = cacheado
-            n_after_ori = len(surv_genes)
-            # El paso 5 (genes semilla forzados) lo necesita, y normalmente lo
-            # deja puesto _fit_fmm_batch, que aqui no se ha llegado a ejecutar.
-            if stab_model is not None:
-                self._cached_stab_model = stab_model
-            self._log(f"  Ajustes ORI/FMM reutilizados de cache "
-                      f"({n_after_ori} supervivientes)")
-        else:
-            # ── 1. Ajuste ORI (regresion isotonica circular unimodal) ──
-            self._log(f"  Genes totales: {n_total}")
-            self._log("  Ajustando ORI (PAVA unimodal) ...")
+        mask_ori     = r2_ori >= self.r2_ori_threshold  # criterio: R2_ORI >= tau_ORI
+        surv_genes   = [g for g, m in zip(gene_names, mask_ori) if m]
+        surv_r2_ori  = r2_ori[mask_ori]
+        n_after_ori  = len(surv_genes)
 
-            r2_ori = self._fit_ori_batch(values, circ)
+        self._log(f"  Supervivientes R2_ORI: {n_after_ori}")
 
-            # ── 2. Filtro R2_ORI ───────────────────────────────────────
-            self._log(
-                f"  Filtro R2_ORI >= {self.r2_ori_threshold} ..."
-            )
+        # ── 3. Ajustar FMM a los supervivientes (paralelo) ─────────
+        self._log("  Ajustando FMM ...")
 
-            mask_ori     = r2_ori >= self.r2_ori_threshold  # criterio: R2_ORI >= tau_ORI
-            surv_genes   = [g for g, m in zip(gene_names, mask_ori) if m]
-            surv_r2_ori  = r2_ori[mask_ori]
-            n_after_ori  = len(surv_genes)
+        surv_rows = np.array(
+            [expr_norm.loc[g].values.astype(np.float64) for g in surv_genes]
+        )
 
-            self._log(f"  Supervivientes R2_ORI: {n_after_ori}")
+        fmm_results = self._fit_fmm_batch(surv_rows, circ)
 
-            # ── 3. Ajustar FMM a los supervivientes (paralelo) ─────────
-            self._log("  Ajustando FMM ...")
-
-            surv_rows = np.array(
-                [expr_norm.loc[g].values.astype(np.float64) for g in surv_genes]
-            )
-
-            fmm_results = self._fit_fmm_batch(surv_rows, circ)
-
-            fmm_peaks_all = np.array([r[0] for r in fmm_results])
-            fmm_omega_all = np.array([r[1] for r in fmm_results])
-            fmm_r2_all    = np.array([r[2] for r in fmm_results])
-
-            if fit_cache is not None:
-                fit_cache[clave] = (
-                    r2_ori, surv_genes, surv_r2_ori, surv_rows,
-                    fmm_peaks_all, fmm_omega_all, fmm_r2_all,
-                    getattr(self, "_cached_stab_model", None),
-                )
+        fmm_peaks_all = np.array([r[0] for r in fmm_results])
+        fmm_omega_all = np.array([r[1] for r in fmm_results])
+        fmm_r2_all    = np.array([r[2] for r in fmm_results])
 
         # ── 4. Filtro FMM: omega > min Y R2_FMM >= umbral ─────────────
         mask_fmm = (
@@ -687,10 +623,11 @@ class TopGeneSelector:
         # se fuerza ningun gen que no supere ya los dos primeros criterios
         # (comprobado con datos reales: rellenar con R2<r2_fmm_threshold
         # mete en el TOP genes que el propio filtro ya habia rechazado). El
-        # cupo ``target_size`` se reparte despues entre los sectores que si
-        # tienen genes, tomando en cada uno los de mayor R2_FMM.
+        # cupo (``top_fraction`` del total de genes) se reparte despues entre
+        # los sectores que si tienen genes, tomando en cada uno los de mayor
+        # R2_FMM.
         sel_idx, cov_idx = self._select_top_indices(
-            fmm_peaks_all, fmm_omega_all, fmm_r2_all, mask_fmm,
+            fmm_peaks_all, fmm_omega_all, fmm_r2_all, mask_fmm, n_total,
         )
         coverage_names = [surv_genes[i] for i in cov_idx]
 
@@ -724,10 +661,10 @@ class TopGeneSelector:
                 continue
 
             row = expr_norm.loc[seed].values.astype(np.float64)
-            if self.fmm_method == "stabilized":
-                # Reusa el StabilizedFMMModel cacheado en _fit_fmm_batch
-                pk, om, r2, *_ = _fit_fmm_one_stab(
-                    row, circ, self._cached_stab_model,
+            if self.fmm_method == "circafmm":
+                # Reusa el CircaFMMModel cacheado en _fit_fmm_batch
+                pk, om, r2, *_ = _fit_fmm_one_circafmm(
+                    row, circ, self._cached_circafmm_model,
                 )
             else:
                 pk, om, r2, *_ = _fit_fmm_one(
@@ -804,7 +741,6 @@ class TopGeneSelector:
             candidate_matrix = top_matrix,
             circular_scale   = circ,
             added_genes      = forced,
-            coverage_genes   = coverage_names,
             sample_order     = np.asarray(sample_order, dtype=int),
             omega            = np.array(acc_omega),
             r2_ori           = np.array(acc_r2_ori),
@@ -826,6 +762,7 @@ class TopGeneSelector:
         omega:    np.ndarray,
         r2_fmm:   np.ndarray,
         mask_fmm: np.ndarray,
+        n_total:  int,
     ) -> np.ndarray:
         """Indices del conjunto TOP tras imponer cobertura circular y cuota.
 
@@ -837,21 +774,14 @@ class TopGeneSelector:
            los picos ``t_U`` de los genes filtrados. Si algun sector queda
            vacio se avisa por consola, pero **no se rellena con ningun gen
            que no supere ya ``omega_min`` Y ``r2_fmm_threshold``** (es decir,
-           que no pertenezca a ``mask_fmm``): comprobado con datos reales
-           (cerebro humano post mortem, GSE71620/BA11), relajar el umbral de
-           R2_FMM para rellenar huecos metia en el conjunto TOP genes con
-           R2 tan bajo como 0.37, por debajo del propio umbral de calidad
-           que exige la Seccion 3. Si el tejido genuinamente no tiene ningun
-           gen ritmico con pico en un sector, el sector queda sin cubrir en
-           vez de maquillarlo con un ajuste que el propio criterio de
-           calidad ya ha rechazado.
+           que no pertenezca a ``mask_fmm``)
 
-        2. **Cupo por sector.** Si ``target_size`` no es None, se retienen como
-           mucho ``target_size`` genes: el cupo se reparte a partes iguales
+        2. **Cupo por sector.** Se retienen como mucho
+           ``max(n_sectors, round(top_fraction * n_total))`` genes: el cupo se reparte a partes iguales
            entre los sectores no vacios y dentro de cada uno se ordena por
            ``R2_FMM`` descendente. Las plazas que un sector no llegue a cubrir
            (porque tiene menos genes que su cupo) se redistribuyen entre los
-           que aun tienen candidatos, de forma que se alcance ``target_size``
+           que aun tienen candidatos, de forma que se alcance el cupo
            siempre que haya genes suficientes.
 
            El reparto por sectores, y no un ranking global, evita que el cupo
@@ -890,14 +820,16 @@ class TopGeneSelector:
 
         # ── 2. Cupo absoluto, estratificado por sector ────────────────────
         cov_arr = cov
-        if self.target_size is None or self.target_size >= sel.size:
+        target_size = max(n_sec, int(round(self.top_fraction * n_total)))
+        if target_size >= sel.size:
             return sel, cov_arr
 
         chosen_arr, quota = apply_sector_quota(
-            sel, sectors, r2_fmm, cov_arr, n_sec, self.target_size,
+            sel, sectors, r2_fmm, cov_arr, n_sec, target_size,
         )
         self._log(
-            f"  Cupo target_size={self.target_size}: "
+            f"  Cupo {target_size} genes (top_fraction={self.top_fraction} "
+            f"de {n_total}): "
             f"{chosen_arr.size}/{sel.size} genes retenidos "
             f"(por sector: { {s: int(quota[s]) for s in sorted(quota)} })"
         )
@@ -947,7 +879,7 @@ class TopGeneSelector:
           (vector ``row`` + escalares); el coste de serializar es bajo y
           se gana paralelismo real saltando el GIL.
 
-        - **stabilized**: ``threading``. Los workers comparten ``prepared``
+        - **circafmm**: ``threading``. Los workers comparten ``prepared``
           (~23 MB de matrices precomputadas) por memoria sin serializar.
           El fit interno usa BLAS/LAPACK y kernels ``@njit``, que liberan
           el GIL, asi que threading da paralelismo efectivo aqui.
@@ -955,20 +887,20 @@ class TopGeneSelector:
         n = rows.shape[0]
         from joblib import Parallel, delayed
 
-        # ── Camino estabilizado: prep + threading ────────────────────────
-        if self.fmm_method == "stabilized":
-            self._log(f"  Preparando FMM estabilizado (calibracion lambda)...")
-            prepared = prepare_dataset(circ, **self.fmm_stab_kwargs)
-            stab_model = StabilizedFMMModel(prepared=prepared, refine=self.fmm_refine)
-            self._cached_stab_model = stab_model        # reutilizable para seeds forzados
+        # ── Camino CircaFMM: prep + threading ────────────────────────
+        if self.fmm_method == "circafmm":
+            self._log(f"  Preparando CircaFMM (calibracion lambda)...")
+            prepared = prepare_dataset(circ, **self.circafmm_kwargs)
+            circafmm_model = CircaFMMModel(prepared=prepared, refine=self.fmm_refine)
+            self._cached_circafmm_model = circafmm_model        # reutilizable para seeds forzados
             self._log(f"  lambda* = {prepared.lambda_star:.4f}")
 
             if self.n_jobs == 1 or n <= 8:
-                return [_fit_fmm_one_stab(rows[i], circ, stab_model) for i in range(n)]
+                return [_fit_fmm_one_circafmm(rows[i], circ, circafmm_model) for i in range(n)]
 
-            self._log(f"  Paralelizando {n} ajustes FMM (stab, threads) en {self.n_jobs} jobs ...")
+            self._log(f"  Paralelizando {n} ajustes FMM (CircaFMM, threads) en {self.n_jobs} jobs ...")
             return Parallel(n_jobs=self.n_jobs, backend="threading")(
-                delayed(_fit_fmm_one_stab)(rows[i], circ, stab_model)
+                delayed(_fit_fmm_one_circafmm)(rows[i], circ, circafmm_model)
                 for i in range(n)
             )
 

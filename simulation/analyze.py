@@ -10,7 +10,7 @@ Las tres preguntas y como se responden
 --------------------------------------
 1. **Reconstruccion.** Como se comporta CIRCUST tal cual (FMM base, best_k
    con r2_median) a lo largo de los factores. ``tabla_reconstruccion``.
-2. **Regularizacion del FMM.** Diferencia PAREADA estabilizado menos base,
+2. **Regularizacion del FMM.** Diferencia PAREADA CircaFMM menos base,
    replica a replica y con el metodo de resumen fijo. ``contraste_fmm``.
 3. **Agregacion.** Diferencia PAREADA de cada metodo de resumen contra la
    referencia, con el FMM fijo. ``contraste_metodos``.
@@ -75,6 +75,7 @@ ETIQUETAS = {
     "error_fase_h":              "error de fase absoluta (h)",
     "error_fase_medio_h":        "error de fase absoluta, media (h)",
     "concordancia":              "concordancia circular",
+    "cre":                       "error relativo de concordancia (CRE)",
     "tau_circular":              "tau circular con signo",
     "acierto_sentido":           "acierto del sentido de giro",
     "atlas_error_onda":          "error de la onda del atlas",
@@ -109,7 +110,7 @@ def etiqueta(clave: str) -> str:
 # dos: cuatro replicas +0,8 +0,8 -0,8 -0,8 dan mediana 0,0, que se lee como
 # "no se recupero nada" cuando la calidad real es 0,8 en las cuatro.
 MEDIDAS = ["error_fase_h", "error_fase_medio_h", "error_orden_h", "concordancia",
-           "rho_fl", "rho_circ", "tau",
+           "cre", "rho_fl", "rho_circ", "tau",
            "p2", "r2_anchor", "evidencia", "n_top"]
 
 # Proporciones, se agregan con media porque son tasas.
@@ -120,15 +121,23 @@ TASAS = ["acierto_sentido"]
 #
 #   resumen       atlas_error_onda      libre de parametrizacion
 #   interpretable atlas_variabilidad_pico_h   en horas
-#   mecanismo     atlas_sesgo_omega     por que el estabilizado mejora
+#   mecanismo     atlas_sesgo_omega     por que CircaFMM mejora
 #   practica      atlas_vpp             cuantos genes del atlas son ritmicos
 MEDIDAS_ATLAS = ["atlas_error_onda", "atlas_variabilidad_pico_h",
                  "atlas_sesgo_omega", "atlas_vpp"]
 
 # Medidas de orden sobre las que se contrastan los metodos de resumen. El
 # error del orden relativo y |tau_circular| miden el orden al margen del anclaje, error_fase_h es el
-# resultado conjunto que ve el usuario.
-MEDIDAS_ORDEN = ["error_orden_h", "concordancia", "error_fase_h"]
+# resultado conjunto que ve el usuario. El CRE mide lo mismo desde la senal:
+# cuanto se aleja el ajuste FMM con las fases estimadas del ajuste con las
+# verdaderas.
+MEDIDAS_ORDEN = ["error_orden_h", "concordancia", "cre", "error_fase_h"]
+
+# El CRE se calcula con el modelo FMM de cada configuracion, asi que sus
+# valores con FMM base y con CircaFMM no son comparables entre si (CircaFMM da
+# curvas mas suaves y eso, por si solo, baja el CRE). Vale para contrastar
+# metodos de resumen dentro de un modelo, no para el contraste entre modelos.
+MEDIDAS_ORDEN_ENTRE_FMM = [m for m in MEDIDAS_ORDEN if m != "cre"]
 
 TIEMPOS = ["t_preprocess_s", "t_cpca_s", "t_sync_s", "t_top_s",
            "t_robust_s", "t_total_s"]
@@ -292,7 +301,7 @@ def tabla_invariancia(df: pd.DataFrame) -> pd.DataFrame:
 def tabla_atlas(df: pd.DataFrame,
                 metodo: str = METODO_REFERENCIA) -> pd.DataFrame:
     """
-    Calidad del atlas en NIVELES, base al lado de estabilizado.
+    Calidad del atlas en NIVELES, base al lado de CircaFMM.
 
     ``contraste_fmm`` da la diferencia pareada, que es la que tiene potencia,
     pero una diferencia sola no dice si el atlas es utilizable. Esta tabla
@@ -348,7 +357,7 @@ def _emparejar(a: pd.DataFrame, b: pd.DataFrame, medidas: list[str],
 def contraste_fmm(df: pd.DataFrame, metodo: str = METODO_REFERENCIA,
                   solo_orientadas: bool = True) -> pd.DataFrame:
     """
-    Pregunta 2: estabilizado menos base, pareado, con el metodo de resumen
+    Pregunta 2: CircaFMM menos base, pareado, con el metodo de resumen
     fijo.
 
     El orden de muestras sale de una SVD sobre los genes nucleares donde el
@@ -362,13 +371,13 @@ def contraste_fmm(df: pd.DataFrame, metodo: str = METODO_REFERENCIA,
     """
     r = _rejilla(df)
     r = r[r["metodo"] == metodo]
-    medidas = MEDIDAS_ATLAS + MEDIDAS_ORDEN + ["acierto_sentido", "t_total_s"]
+    medidas = MEDIDAS_ATLAS + MEDIDAS_ORDEN_ENTRE_FMM + ["acierto_sentido", "t_total_s"]
     par = _emparejar(r[r["fmm_method"] == "base"],
-                     r[r["fmm_method"] == "stabilized"],
-                     medidas, ("_base", "_stab"))
+                     r[r["fmm_method"] == "circafmm"],
+                     medidas, ("_base", "_circafmm"))
     if solo_orientadas:
         par = par[(par["acierto_sentido_base"] == 1.0)
-                  & (par["acierto_sentido_stab"] == 1.0)]
+                  & (par["acierto_sentido_circafmm"] == 1.0)]
     return par.reset_index(drop=True)
 
 
@@ -696,10 +705,10 @@ def main() -> None:
     _escribir("tabla_atlas",          lambda: tabla_atlas(df), tablas)
     _escribir("tabla_tiempos_python", lambda: tabla_tiempos_python(df), tablas)
 
-    # Pregunta 2: el FMM estabilizado
+    # Pregunta 2: CircaFMM
     try:
         fmm = contraste_fmm(df)
-        for m in MEDIDAS_ATLAS + MEDIDAS_ORDEN:
+        for m in MEDIDAS_ATLAS + MEDIDAS_ORDEN_ENTRE_FMM:
             _escribir(f"fmm_efectos_{m}", lambda m=m: efectos_principales(fmm, m), tablas)
             _escribir(f"fmm_modelo_{m}",  lambda m=m: modelo_lineal(fmm, m), tablas)
         _escribir("fmm_interaccion_n_snr",
@@ -709,7 +718,7 @@ def main() -> None:
                   lambda: interaccion(fmm, "atlas_error_onda", "omega", "n_samples"),
                   tablas)
         figura_efectos(fmm, "atlas_error_onda",
-                       "FMM estabilizado menos base (negativo = mejora)",
+                       "CircaFMM menos base (negativo = mejora)",
                        imagenes / "sim-fmm-efectos.png")
         print("  escrita sim-fmm-efectos.png")
     except (KeyError, ValueError) as exc:

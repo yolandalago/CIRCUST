@@ -2,7 +2,7 @@
 Tests de las metricas de calidad del atlas.
 
 Comparan los parametros FMM estimados por gen contra los verdaderos. Son las
-metricas del bloque de regularizacion, porque el FMM estabilizado no cambia
+metricas del bloque de regularizacion, porque CircaFMM no cambia
 el orden de muestras (ese sale de una SVD donde el FMM no interviene) sino
 la estimacion de los parametros por gen, que es lo que el atlas publica.
 

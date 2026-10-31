@@ -151,7 +151,7 @@ def test_la_evidencia_cae_cuando_los_core_se_ajustan_mal():
 
 def test_run_full_publica_el_atlas(celda_pequena):
     """
-    El atlas es lo que se compara entre FMM base y estabilizado, porque el
+    El atlas es lo que se compara entre FMM base y CircaFMM, porque el
     orden de muestras sale de una SVD donde el FMM no interviene.
     """
     X, truth = celda_pequena
@@ -185,3 +185,20 @@ def test_se_puede_pedir_el_pipeline_sin_atlas(celda_pequena):
     X, truth = celda_pequena
     res = run_full(X, truth, 20, RobustConfig(n_reps=3), con_atlas=False)
     assert res.atlas is None
+
+
+def test_compartir_las_repeticiones_entre_metodos_no_cambia_nada(celda_pequena):
+    """
+    El ejecutor calcula las K repeticiones una vez por grupo y las resume con
+    cada metodo. Tiene que dar lo mismo que dejar que cada metodo las calcule.
+    """
+    from simulation.grid import METODOS_RESUMEN
+    from simulation.runner import run_stage_4_repetitions
+    X, truth = celda_pequena
+    estado = run_stages_0_3(X, truth, 20)
+    reps = run_stage_4_repetitions(estado, truth, "base", METODOS_RESUMEN[0])
+    for metodo in METODOS_RESUMEN:
+        solo      = run_stage_4(estado, truth, metodo, "base")
+        compartido = run_stage_4(estado, truth, metodo, "base", reps=reps)
+        pd.testing.assert_series_equal(solo.theta_hat, compartido.theta_hat)
+        pd.testing.assert_frame_equal(solo.atlas, compartido.atlas)

@@ -28,6 +28,8 @@ Uso
     python -m simulation.rbench --reps 3 --out output/simulacion
     python -m simulation.rbench --reps 3 --out output/simulacion --run-r
     python -m simulation.rbench --consolidar-r --out output/simulacion
+    python -m simulation.rbench --consolidar-r --out output/simulacion_2026-10 \
+        --r-dir output/simulacion/rbench
 
 El primero exporta las celdas y cronometra Python. El segundo hace ademas la
 pasada de R celda a celda. El tercero solo recoge los ``timing_r.csv`` que R
@@ -50,7 +52,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from simulation.generate import generate_dataset
 from simulation.grid import build_grid
-from simulation.runner import RobustConfig, run_stage_4, run_stages_0_3
+from simulation.runner import (
+    RobustConfig, run_stage_4, run_stage_4_repetitions, run_stages_0_3,
+)
 from simulation.truth import ANCHOR_NAME, OPPOSITE_NAME, SimConfig, SimulationTruth
 
 # Los 12 nombres que benchmark_timing.R tiene escritos a mano en su ``coreG``.
@@ -130,31 +134,39 @@ def export_for_r(
 def time_python(matrix: pd.DataFrame, truth: SimulationTruth,
                 n_core: int, celda_dir: Path | None = None) -> dict[str, float]:
     """
-    Tiempos por etapa de una ejecucion completa en Python, FMM base y el
-    metodo de resumen de referencia, sin construir el atlas: el R original
-    tampoco lo construye dentro de las etapas que se cronometran.
+    Tiempos por etapa en Python con la configuracion comparable a R: FMM base
+    y la Etapa 4 cronometrada hasta las K repeticiones.
+
+    El CIRCUST original termina la Etapa 4 con las K repeticiones
+    sincronizadas y el ajuste FMM de cada gen TOP en cada una
+    (``robustEst_v3_cores`` y ``robustSincroDBP_v3_cores``), sin colapsarlas
+    en un orden. Por eso ``robust_order`` cuenta solo
+    :func:`run_stage_4_repetitions`. El resumen de las K, que R no hace, se
+    cronometra aparte en ``resumen`` y no entra en ``total``.
 
     Con ``celda_dir`` vuelca ademas las dos salidas que se comparan con R:
 
     ``py_fases_preliminar.csv``
         La fase por muestra del ORDEN PRELIMINAR, que es la salida homologa a
-        la que reporta R. El CIRCUST original resume las K repeticiones con
-        una mediana de parametros FMM y no las colapsa en un orden de
-        muestras, asi que la unica fase por muestra que publica es esta.
+        la que reporta R, la unica fase por muestra que publica.
     ``py_fases_robusto.csv``
-        La fase por muestra tras la Etapa 4. No tiene equivalente en R, y esa
-        ausencia es justamente el hueco que llena este trabajo.
+        La fase por muestra tras resumir las K repeticiones con el metodo de
+        referencia. No tiene equivalente en R.
 
-    El volcado va fuera de las dos regiones cronometradas, asi que no
-    contamina los tiempos.
+    El volcado va fuera de las regiones cronometradas.
     """
     t = time.perf_counter()
     estado = run_stages_0_3(matrix, truth, n_core, "base")
     t_0_3 = time.perf_counter() - t
 
     t = time.perf_counter()
-    etapa4 = run_stage_4(estado, truth, RobustConfig(), "base", con_atlas=False)
+    reps = run_stage_4_repetitions(estado, truth, "base", RobustConfig())
     t_4 = time.perf_counter() - t
+
+    t = time.perf_counter()
+    etapa4 = run_stage_4(estado, truth, RobustConfig(), "base",
+                         con_atlas=False, reps=reps)
+    t_resumen = time.perf_counter() - t
 
     if celda_dir is not None:
         celda_dir = Path(celda_dir)
@@ -170,6 +182,7 @@ def time_python(matrix: pd.DataFrame, truth: SimulationTruth,
 
     tiempos = {k: float(v) for k, v in estado.timing.items()}
     tiempos["robust_order"] = t_4
+    tiempos["resumen"] = t_resumen
     tiempos["stages_0_3"] = t_0_3
     tiempos["total"] = t_0_3 + t_4
     return tiempos
@@ -194,7 +207,8 @@ def run_r(celda_dir: Path, etiqueta: str) -> Path:
          "--reps", "1",
          "--label", etiqueta,
          "--out", str(destino),
-         "--dump", str(celda_dir)],
+         # absoluta a proposito: R corre el pipeline en un scratch temporal
+         "--dump", str(celda_dir.resolve())],
         cwd=PROJECT_ROOT, check=True, capture_output=True, text=True,
     )
     return destino
@@ -256,7 +270,10 @@ def main() -> None:
                     "cronometra Python y opcionalmente R.",
     )
     parser.add_argument("--reps", type=int, default=3)
-    parser.add_argument("--out", type=str, default="output/simulacion")
+    parser.add_argument("--out", type=str, default="output/simulacion_2026-10")
+    parser.add_argument("--r-dir", type=str, default=None,
+                        help="Carpeta con las celdas en las que ya corrio R "
+                             "(con --consolidar-r). Por defecto, la de --out.")
     parser.add_argument("--export-only", action="store_true",
                         help="Solo escribe las celdas para R, sin cronometrar.")
     parser.add_argument("--run-r", action="store_true",
@@ -271,7 +288,7 @@ def main() -> None:
     destino = salida / "tiempos.csv"
 
     if args.consolidar_r:
-        r = consolidar_r(raiz)
+        r = consolidar_r(Path(args.r_dir) if args.r_dir else raiz)
         _anadir(destino, r)
         print(f"Anadidas {len(r)} filas de R a {destino}")
         return

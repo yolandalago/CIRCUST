@@ -10,10 +10,10 @@ La rejilla unificada
 --------------------
 El bloque ``rejilla`` es el que evalua las tres aportaciones del TFG. Es un
 factorial de los factores de generacion, y sobre CADA celda y replica se
-corren las dos variantes del FMM (base y estabilizado) y los cinco metodos de
+corren las dos variantes del FMM (base y CircaFMM) y los seis metodos de
 resumen de las K repeticiones, todos sobre la misma matriz. Asi:
 
-- el contraste base contra estabilizado existe en todas las celdas, y ademas
+- el contraste base contra CircaFMM existe en todas las celdas, y ademas
   por metodo de resumen,
 - el contraste entre metodos de resumen existe en todas las celdas, y ademas
   por variante del FMM,
@@ -22,7 +22,7 @@ resumen de las K repeticiones, todos sobre la misma matriz. Asi:
 Los antiguos bloques ``principal``, ``regularizacion``, ``agregacion`` y
 ``gcore`` evaluaban cada mejora en un subconjunto de ejes distinto, con lo que
 no se podia responder, por ejemplo, si la agregacion ayuda con muestreo
-agrupado o si el estabilizado ayuda con pocos genes ritmicos. Esta rejilla
+agrupado o si CircaFMM ayuda con pocos genes ritmicos. Esta rejilla
 los sustituye. ``sin_ruido`` e ``invariancia`` se mantienen como verificacion,
 y ``computacional`` es el bloque de R, que va aparte porque R es unas 20
 veces mas lento y necesita un proceso por celda.
@@ -51,7 +51,7 @@ N_NIVELES     = (24, 48, 96)
 MUESTREOS     = ("uniforme", "agrupado", "hueco")
 OMEGAS        = (0.1, 0.5, 0.9)
 GCORE_NIVELES = (10, 20, 30)
-FMM_METODOS   = ("base", "stabilized")
+FMM_METODOS   = ("base", "circafmm")
 
 # Tamano de la matriz y proporcion de ritmicos, como eje conjunto. Lo que el
 # pipeline ve de verdad es cuantos genes ritmicos hay (el TOP satura en 100
@@ -81,12 +81,16 @@ GCORE_CENTRAL    = 20
 OMEGA_MEZCLA        = (0.1, 0.5, 0.9)
 GENES_COMPUTACIONAL = (1000, 5000, 20000)
 
+# Todas las formas de resumir las K repeticiones que ofrece el pipeline: los
+# tres criterios de seleccion y los tres metodos de consenso. TSP y Hodge van
+# con sus valores por defecto, TSP3 (alpha = 3) y HODs.
 METODOS_RESUMEN: list[RobustConfig] = [
     RobustConfig(robust_method="best_k",    selection_criterion="r2_median"),
+    RobustConfig(robust_method="best_k",    selection_criterion="n_well_fitted"),
     RobustConfig(robust_method="best_k",    selection_criterion="medoid"),
-    RobustConfig(robust_method="aggregate", aggregation="tsp3", consensus_scale="circmean"),
-    RobustConfig(robust_method="aggregate", aggregation="hods", consensus_scale="circmean"),
-    RobustConfig(robust_method="aggregate", aggregation="tsp3", consensus_scale="cire"),
+    RobustConfig(robust_method="aggregate", aggregation="circmean"),
+    RobustConfig(robust_method="aggregate", aggregation="tsp"),
+    RobustConfig(robust_method="aggregate", aggregation="hod"),
 ]
 
 # El metodo de referencia: es lo que hace CIRCUST tal cual esta en el codigo
@@ -101,7 +105,7 @@ METODO_REFERENCIA = METODOS_RESUMEN[0]
 SIGMA_SIN_RUIDO = 1e-6
 
 BLOQUES = (
-    "rejilla", "sin_ruido", "sin_ruido_stab", "invariancia", "computacional",
+    "rejilla", "sin_ruido", "sin_ruido_circafmm", "invariancia", "computacional",
 )
 
 
@@ -218,15 +222,15 @@ def build_grid(bloque: str, reps: int) -> list[Cell]:
                                                metodo, rep))
         return celdas
 
-    if bloque in ("sin_ruido", "sin_ruido_stab"):
+    if bloque in ("sin_ruido", "sin_ruido_circafmm"):
         # Verificacion de que el pipeline reconstruye el orden cuando los
         # datos son perfectos. Factorial de los tres factores de forma, sin
         # el eje de senal-ruido, que aqui no aplica. Cualquier error residual
         # no puede venir del ruido, asi que aisla los sesgos del algoritmo.
         #
-        # La variante _stab corre las MISMAS matrices con el FMM estabilizado
+        # La variante _circafmm corre las MISMAS matrices con CircaFMM
         # y aisla el sesgo propio de la regularizacion.
-        fmm = "base" if bloque == "sin_ruido" else "stabilized"
+        fmm = "base" if bloque == "sin_ruido" else "circafmm"
         for n in N_NIVELES:
             for muestreo in MUESTREOS:
                 for omega in OMEGAS:

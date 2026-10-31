@@ -60,6 +60,8 @@ class FitResult:
 
     r2 : float
         Coeficiente de determinacion  R-cuadrado = 1 - SS_res / SS_tot.
+        En CircaFMM ambas sumas van ponderadas con los pesos de
+        densidad temporal, los mismos de su ajuste por WLS.
 
     residuals : np.ndarray, forma (n_muestras,)
         Residuos brutos: datos - ajustado.

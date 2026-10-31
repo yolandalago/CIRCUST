@@ -20,12 +20,12 @@ Diferencias deliberadas frente a ``run_pipeline.py``
 
 El atlas
 --------
-Se construye con el mismo ``_build_atlas`` de ``run_pipeline``, no con una
-copia, porque el bloque de regularizacion lo necesita: el FMM estabilizado
-**no puede** cambiar el orden de muestras, que sale de una SVD sobre los
+Se construye con el mismo ``build_atlas`` de ``robust_order`` que usa
+``run_pipeline``, no con una copia, porque el bloque de regularizacion lo
+necesita: CircaFMM **no puede** cambiar el orden de muestras, que sale de una SVD sobre los
 genes nucleares donde el FMM no interviene en ningun paso. Donde si cambia
 las cosas es en los parametros por gen, y eso es lo que el atlas publica.
-Comparar base contra estabilizado sobre el orden seria compararlos donde son
+Comparar base contra CircaFMM sobre el orden seria compararlos donde son
 identicos por construccion.
 
 Indicadores observables
@@ -60,12 +60,13 @@ for _extra in (PROJECT_ROOT / "src", PROJECT_ROOT / "scripts"):
 from circust.core_genes    import CoreGeneSelector
 from circust.cpca          import CPCA
 from circust.preprocessing import Preprocessor
-from circust.robust_order  import RobustOrderEstimator
+from circust.robust_order  import RobustOrderEstimator, RobustRepetitions, build_atlas
 from circust.synchronizer  import CircularSynchronizer
 from circust.top_genes     import TopGeneSelector
 
-from run_pipeline import DEFAULT_CONFIG, _build_atlas   # no se redeclaran
+from run_pipeline import DEFAULT_CONFIG   # no se redeclara
 
+from simulation.salidas import fases_por_muestra
 from simulation.truth import TWO_PI, SimulationTruth
 
 # Mismos valores que usa scripts/run_pipeline.py en la Etapa 3. No estan en
@@ -74,8 +75,8 @@ R2_ORI_THRESHOLD       = 0.5
 R2_FMM_THRESHOLD       = 0.5
 OMEGA_MIN              = 0.1
 N_SECTORS              = 8
-TARGET_SIZE            = 100
-SELECTION_R2_THRESHOLD = 0.65
+TOP_FRACTION           = 0.005
+SELECTION_R2_THRESHOLD = 0.5
 SAMPLE_SIZE_FRACTION   = 2.0 / 3.0
 # R2 minimo que exige el Paso 2.2 para que un par de consistencia cuente.
 CONSISTENCY_R2_MIN     = 0.5
@@ -85,12 +86,22 @@ CONSISTENCY_R2_MIN     = 0.5
 class RobustConfig:
     """Configuracion de la Etapa 4, lo unico que cambia entre metodos."""
 
-    robust_method:       str = "best_k"      # best_k|aggregate|median
+    robust_method:       str = "best_k"      # best_k|aggregate
     selection_criterion: str = "r2_median"   # r2_median|n_well_fitted|medoid
-    aggregation:         str = "auto"        # auto|tsp3|hods
-    consensus_scale:     str = "circmean"    # circmean|cire
+    aggregation:         str = "circmean"    # circmean|tsp|hod
     n_reps:              int = 5
     seed:                int = 42
+
+    @property
+    def consensus_scale(self) -> str:
+        """Como se obtienen las fases del consenso, que ya no se elige aparte.
+
+        Se deduce del metodo: la media circular da sus propias fases y TSP y
+        Hodge las reconstruyen por CIRE bajo su orden. Se conserva como
+        columna del CSV para que las salidas antiguas, en las que se elegia,
+        sigan siendo comparables.
+        """
+        return "circmean" if self.aggregation == "circmean" else "cire"
 
     @property
     def label(self) -> str:
@@ -128,6 +139,8 @@ class Stage4Result:
     desacuerdo_K:    float
     direction_flips: int
     atlas:           pd.DataFrame | None = None
+    selected_rep:    int | None = None      # solo best_k
+    msce:            float | None = None    # solo aggregate
 
 
 @dataclass
@@ -168,7 +181,7 @@ def _diagnostico_pares(
 
     Es la variable candidata a decidir si se puede confiar en el sentido de
     giro de un tejido sin conocer la verdad. El umbral no se fija aqui: lo
-    calibra el estudio, comparando esta cantidad contra ``acierto_sentido``.
+    calibra el estudio, comparando esta cantidad contra el signo de ``tau_circular``.
 
     Ambos son ``nan`` si ningun par es evaluable, que es informacion distinta
     de que ningun par se cumpla.
@@ -288,7 +301,7 @@ def run_stages_0_3(
         r2_fmm_threshold      = R2_FMM_THRESHOLD,
         omega_min             = OMEGA_MIN,
         n_sectors             = N_SECTORS,
-        target_size           = TARGET_SIZE,
+        top_fraction          = TOP_FRACTION,
         fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid = cfg["fmm_omega_grid"],
         fmm_num_reps          = cfg["fmm_reps"],
@@ -320,33 +333,24 @@ def run_stages_0_3(
     )
 
 
-def run_stage_4(
+def _estimador(
     state:      PreRobustState,
     truth:      SimulationTruth,
     robust_cfg: RobustConfig,
-    fmm_method: str = "base",
-    con_atlas:  bool = True,
-) -> Stage4Result:
-    """
-    Etapa 4: estimacion robusta del orden a partir del estado intermedio.
-
-    Devuelve las fases estimadas **indexadas por nombre de muestra**, no por
-    posicion: el pipeline elimina outliers y reordena columnas.
-    """
+    fmm_method: str,
+) -> RobustOrderEstimator:
+    """El estimador de la Etapa 4 con la configuracion de ``run_pipeline``."""
     cfg = DEFAULT_CONFIG
-    consistency_pairs = truth.consistency_pairs()
-
-    resultado = RobustOrderEstimator(
+    return RobustOrderEstimator(
         n_reps                 = robust_cfg.n_reps,
         sample_size_fraction   = SAMPLE_SIZE_FRACTION,
         method                 = robust_cfg.robust_method,
         selection_criterion    = robust_cfg.selection_criterion,
         selection_r2_threshold = SELECTION_R2_THRESHOLD,
         aggregation_method     = robust_cfg.aggregation,
-        consensus_scale_mode   = robust_cfg.consensus_scale,
         anchor_gene            = truth.anchor,
         direction_gene         = truth.direction,
-        consistency_pairs      = consistency_pairs,
+        consistency_pairs      = truth.consistency_pairs(),
         fmm_length_alpha_grid  = cfg["fmm_alpha_grid"],
         fmm_length_omega_grid  = cfg["fmm_omega_grid"],
         fmm_num_reps           = cfg["fmm_reps"],
@@ -355,12 +359,54 @@ def run_stage_4(
         n_jobs                 = 1,
         seed                   = robust_cfg.seed,
         verbose                = False,
-    ).run(
+    )
+
+
+def run_stage_4_repetitions(
+    state:      PreRobustState,
+    truth:      SimulationTruth,
+    fmm_method: str = "base",
+    robust_cfg: RobustConfig | None = None,
+) -> RobustRepetitions:
+    """
+    Las K repeticiones de la Etapa 4, sin resumir.
+
+    Es donde termina la Etapa 4 del CIRCUST original, asi que es el punto en
+    que se para el cronometro al comparar con R. Solo dependen de ``n_reps`` y
+    de la semilla, no del metodo de resumen, y se comparten entre los metodos
+    de un mismo grupo.
+    """
+    robust_cfg = robust_cfg or RobustConfig()
+    return _estimador(state, truth, robust_cfg, fmm_method).run_repetitions(
         top_matrix     = state.top_matrix,
         theta_pre      = state.theta_pre,
         expr_full_norm = state.expr_full_norm,
         core_genes     = state.core_genes,
     )
+
+
+def run_stage_4(
+    state:      PreRobustState,
+    truth:      SimulationTruth,
+    robust_cfg: RobustConfig,
+    fmm_method: str = "base",
+    con_atlas:  bool = True,
+    reps:       RobustRepetitions | None = None,
+) -> Stage4Result:
+    """
+    Etapa 4: estimacion robusta del orden a partir del estado intermedio.
+
+    Con ``reps`` se resumen unas repeticiones ya calculadas por
+    :func:`run_stage_4_repetitions` (con el mismo ``n_reps`` y la misma
+    semilla) en vez de volver a calcularlas. El resultado es identico.
+
+    Devuelve las fases estimadas **indexadas por nombre de muestra**, no por
+    posicion: el pipeline elimina outliers y reordena columnas.
+    """
+    cfg = DEFAULT_CONFIG
+    if reps is None:
+        reps = run_stage_4_repetitions(state, truth, fmm_method, robust_cfg)
+    resultado = _estimador(state, truth, robust_cfg, fmm_method).summarize(reps)
 
     if resultado.sample_order.size == 0:
         raise ValueError(
@@ -375,24 +421,30 @@ def run_stage_4(
     if con_atlas:
         # n_jobs=1: el estudio paraleliza a nivel de celda, y con aggregate
         # esta llamada re-ajusta los genes TOP sobre el orden consenso.
-        atlas = _build_atlas(
-            method_used    = resultado.method_used,
-            selected_fmm   = resultado.selected_fmm,
-            top_matrix     = state.top_matrix,
-            sample_order   = resultado.sample_order,
-            circular_scale = resultado.circular_scale,
-            lambda_star    = state.lambda_star,
-            fmm_method     = fmm_method,
-            cfg            = cfg,
-            n_jobs         = 1,
+        atlas = build_atlas(
+            method_used           = resultado.method_used,
+            selected_fmm          = resultado.selected_fmm,
+            top_matrix            = state.top_matrix,
+            sample_order          = resultado.sample_order,
+            circular_scale        = resultado.circular_scale,
+            fmm_method            = fmm_method,
+            fmm_length_alpha_grid = cfg["fmm_alpha_grid"],
+            fmm_length_omega_grid = cfg["fmm_omega_grid"],
+            fmm_num_reps          = cfg["fmm_reps"],
+            lambda_star           = state.lambda_star,
+            n_jobs                = 1,
         )
 
     flips = np.asarray(resultado.direction_flipped)
     return Stage4Result(
         theta_hat       = pd.Series(fases, index=nombres, name="theta_hat"),
-        desacuerdo_K    = _desacuerdo_entre_repeticiones(resultado.circular_scales),
+        # por muestra: circular_scales[k] viene en el orden de la repeticion k
+        desacuerdo_K    = _desacuerdo_entre_repeticiones(
+            fases_por_muestra(resultado.sample_orders, resultado.circular_scales)),
         direction_flips = int(flips.sum()) if flips.size else 0,
         atlas           = atlas,
+        selected_rep    = resultado.selected_rep,
+        msce            = resultado.aggregation_msce,
     )
 
 

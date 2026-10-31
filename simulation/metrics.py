@@ -7,6 +7,9 @@ gen ancla tiene su pico en ``pi`` por construccion y el sincronizador coloca
 el pico estimado en ``pi``, asi que las dos escalas viven en el mismo marco.
 Las dos medidas ``error_orden_h`` y ``tau_circular`` existen solo como
 diagnostico: dicen si el fallo fue del orden o solo del anclaje.
+
+``cre`` va aparte de ``evaluate`` porque no se calcula con las fases solas:
+necesita la matriz de expresion y ajustar el FMM a cada gen ritmico.
 """
 from __future__ import annotations
 
@@ -211,6 +214,112 @@ def error_orden_h(theta_true, theta_hat, n_grid: int = 720) -> float:
     return float(mejor)
 
 
+# Tipos de gen del generador que llevan senal. Los de ``fondo`` tienen A = 0 y
+# no entran en el CRE: su ajuste FMM es ruido puro con cualquier orden.
+TIPOS_RITMICOS = ("core", "ritmico")
+
+
+def genes_ritmicos(gene_params, disponibles) -> list[str]:
+    """
+    Conjunto T del CRE: los genes ritmicos verdaderos que siguen en la matriz.
+
+    Se toma de la verdad y no del TOP de cada metodo. Si cada metodo aportara
+    su propio T, el CRE compararia cada metodo sobre genes distintos.
+    """
+    disponibles = set(disponibles)
+    ritmicos = gene_params.index[gene_params["kind"].isin(TIPOS_RITMICOS)]
+    return [g for g in ritmicos if g in disponibles]
+
+
+def ajuste_fmm(Y, theta, fmm_method: str = "base",
+               lambda_star: float | None = None) -> np.ndarray:
+    """
+    Valores ajustados de cada fila de ``Y`` sobre los tiempos ``theta``.
+
+    El ajustador es el mismo modelo con el que corrio el pipeline:
+
+    - ``"base"``: FMM base con la rejilla por defecto (48 x 24, 3
+      iteraciones, la misma de ``run_pipeline``).
+    - ``"circafmm"``: CircaFMM con la ``lambda_star`` que calibro el pipeline
+      en ese conjunto de datos, y pesos de densidad recalculados sobre
+      ``theta``, como hace CircaFMM en cada etapa. Se exige la lambda para
+      no lanzar en silencio la calibracion Monte Carlo, que es lo caro, y
+      para que la referencia y la estimada usen la misma penalizacion.
+    """
+    Y = np.atleast_2d(np.asarray(Y, dtype=float))
+    theta = np.asarray(theta, dtype=float) % TWO_PI
+    if Y.shape[1] != theta.size:
+        raise ValueError(f"Y tiene {Y.shape[1]} muestras y theta {theta.size}")
+    if fmm_method == "base":
+        from circust.fitting.fmm import FMMModel
+        modelo = FMMModel()
+    elif fmm_method == "circafmm":
+        if lambda_star is None:
+            raise ValueError("Con CircaFMM hace falta la lambda_star del pipeline")
+        from circust.fitting.circafmm import CircaFMMModel, prepare_dataset
+        modelo = CircaFMMModel(prepared=prepare_dataset(theta, lambda_star=lambda_star))
+    else:
+        raise ValueError(f"fmm_method desconocido: {fmm_method!r}")
+    return np.vstack([modelo.fit(y, theta).fitted for y in Y])
+
+
+def cre(ajuste_real, ajuste_estimado) -> float:
+    """
+    Error relativo de concordancia, adaptado de Larriba et al. (2019, ec. 9).
+
+        CRE = sum_k sum_i (Yr_ki - Ye_ki)^2 / sum_k sum_i (Yr_ki - mean_i Yr_ki)^2
+
+    ``Yr`` es el FMM ajustado a cada gen ritmico con los tiempos verdaderos y
+    ``Ye`` el ajustado con los estimados. Vale 0 con los tiempos verdaderos y
+    crece al estropearlos. Cuando la escala estimada no informa del ritmo,
+    ``Ye`` no tiene relacion con ``Yr`` y el numerador suma la varianza de
+    las dos curvas: con senal clara el FMM sobre tiempos sin sentido sale
+    casi plano y el CRE queda cerca de 1, y con poca senal los dos ajustes
+    persiguen ruido distinto y pasa de 1 (1,2 a 1,3 medido con A/sigma = 1).
+
+    Las dos curvas salen del mismo modelo con el que corrio el pipeline (FMM
+    base o CircaFMM, ver ``ajuste_fmm``), de modo que el CRE mide el orden
+    tal como lo ve ese modelo. Compara metodos de resumen dentro de un mismo
+    modelo, pero no un modelo frente al otro: CircaFMM da curvas mas suaves
+    y eso, por si solo, baja su CRE. Lo bien que ajusta cada modelo lo miden
+    las medidas del atlas contra los parametros verdaderos. Hasta octubre de
+    2026 el ajustador era siempre el FMM base.
+
+    Dos cambios frente al paper:
+
+    - el FMM sustituye a la regresion isotonica circular. A diferencia del
+      ORI, el FMM necesita tiempos y no solo un orden, asi que la medida
+      tambien castiga un mal espaciado de las fases.
+    - el error cuadratico es absoluto y no relativo. El paper divide cada
+      residuo por la observacion de referencia, pensado para niveles de
+      expresion positivos. Aqui cada gen esta normalizado a [-1, 1] y
+      centrado en 0, la curva de referencia cruza el 0 dos veces por ciclo y
+      ese cociente explota. Sumar una constante antes de dividir no lo
+      arregla: con una constante grande la medida converge a esta y con una
+      pequena la dominan los puntos cercanos al cruce.
+
+    Se suma sobre todos los genes antes de dividir, como en el paper. Un
+    cociente por gen explotaria con los genes debiles cuyo ajuste de
+    referencia es casi plano, en el cociente de sumas solo pesan poco.
+
+    Entran todos los genes ritmicos y no una muestra de ellos. Con 200 de
+    1000 la diferencia entre dos metodos sobre la misma replica varia 0,012 a
+    0,017 segun el subconjunto, frente a diferencias reales de 0,03 a 0,06.
+
+    No necesita alinear las escalas: la familia FMM es cerrada bajo rotacion
+    del tiempo (la absorbe ``alpha``) y bajo reflexion (``alpha`` y ``beta``
+    cambian de signo), asi que el ajuste no depende del origen ni del sentido.
+    """
+    Yr = np.atleast_2d(np.asarray(ajuste_real, dtype=float))
+    Ye = np.atleast_2d(np.asarray(ajuste_estimado, dtype=float))
+    if Yr.shape != Ye.shape:
+        raise ValueError(f"Formas distintas: {Yr.shape} y {Ye.shape}")
+    den = float(((Yr - Yr.mean(axis=1, keepdims=True)) ** 2).sum())
+    if den <= 0.0:
+        return float("nan")
+    return float(((Yr - Ye) ** 2).sum() / den)
+
+
 def evaluate(theta_true, theta_hat) -> dict[str, float]:
     """Las siete medidas de la spec sobre un par de escalas circulares."""
     tt = np.asarray(theta_true, dtype=float)
@@ -229,15 +338,11 @@ def evaluate(theta_true, theta_hat) -> dict[str, float]:
         "rho_circ": circular_correlation(tt, th),
         "rho_fl":   fisher_lee_correlation(tt, th),
         "tau":      kendall_tau_fixed_cut(tt, th),
-        # invariante al marco, es el diagnostico
+        # invariante al origen. Su signo dice el sentido de giro (+ el
+        # correcto) y su magnitud la calidad del orden: es la medida del
+        # orden que se usa, sin una tasa de acierto del sentido aparte.
         "tau_circular": tau_circular(tt, th),
     }
-    # El sentido de giro, como columna propia. Va aparte del error porque son
-    # cosas distintas: el orden puede estar bien recuperado y el ciclo
-    # reportarse al reves, y entonces error_fase_medio_h mide la suerte de la orientacion y
-    # no la calidad de la reconstruccion. Promediada sobre replicas da la tasa
-    # de acierto de orientacion.
-    salida["acierto_sentido"] = float(salida["tau_circular"] > 0.0)
     for tol in TOLERANCIAS_H:
         salida[f"p{int(tol)}"] = float((dh <= tol).mean())
     salida["error_orden_h"] = error_orden_h(tt, th)

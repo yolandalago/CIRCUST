@@ -20,14 +20,14 @@ def test_recuentos_de_la_rejilla():
     assert n_escenarios == 3 * 3 * 3 * 4 * 5 == 540
     assert len(escenarios_rejilla()) == n_escenarios
     por_escenario = len(GCORE_NIVELES) * len(FMM_METODOS) * len(METODOS_RESUMEN)
-    assert por_escenario == 3 * 2 * 5
+    assert por_escenario == 3 * 2 * 6
     assert len(build_grid("rejilla", reps=2)) == n_escenarios * por_escenario * 2
 
 
 def test_recuentos_de_los_bloques_de_verificacion():
     esperado = {
         "sin_ruido":      27 * 2,
-        "sin_ruido_stab": 27 * 2,
+        "sin_ruido_circafmm": 27 * 2,
         "invariancia":    6 * 2,
         "computacional":  9 * 2,
     }
@@ -35,13 +35,16 @@ def test_recuentos_de_los_bloques_de_verificacion():
         assert len(build_grid(bloque, reps=2)) == n, bloque
 
 
-def test_hay_cinco_metodos_de_resumen_y_una_referencia():
+def test_hay_seis_metodos_de_resumen_y_una_referencia():
     etiquetas = [m.label for m in METODOS_RESUMEN]
-    assert len(etiquetas) == 5
-    assert len(set(etiquetas)) == 5
+    assert len(etiquetas) == 6
+    assert len(set(etiquetas)) == 6
     assert "best_k:r2_median" in etiquetas
-    assert "aggregate:tsp3:circmean" in etiquetas
-    assert "aggregate:hods:circmean" in etiquetas
+    assert "best_k:n_well_fitted" in etiquetas
+    assert "best_k:medoid" in etiquetas
+    assert "aggregate:circmean:circmean" in etiquetas
+    assert "aggregate:tsp:cire" in etiquetas
+    assert "aggregate:hod:cire" in etiquetas
     # la referencia es el comportamiento actual de CIRCUST antes de agregar
     assert METODO_REFERENCIA.label == "best_k:r2_median"
 
@@ -49,7 +52,7 @@ def test_hay_cinco_metodos_de_resumen_y_una_referencia():
 def test_la_rejilla_es_pareada_en_todas_las_variantes():
     """
     Lo que hace pareada la comparacion: para un escenario y una replica,
-    las 30 variantes (3 core x 2 FMM x 5 metodos) llevan la MISMA semilla y
+    las 36 variantes (3 core x 2 FMM x 6 metodos) llevan la MISMA semilla y
     por tanto corren sobre la misma matriz.
     """
     celdas = build_grid("rejilla", reps=2)
@@ -57,11 +60,11 @@ def test_la_rejilla_es_pareada_en_todas_las_variantes():
     for c in celdas:
         grupos.setdefault((c.cfg, c.rep), []).append(c)
     for (cfg, rep), variantes in grupos.items():
-        assert len(variantes) == 30
+        assert len(variantes) == 36
         assert len({c.cfg.seed for c in variantes}) == 1
         assert {c.fmm_method for c in variantes} == set(FMM_METODOS)
         assert {c.n_core_declared for c in variantes} == set(GCORE_NIVELES)
-        assert len({c.robust_cfg.label for c in variantes}) == 5
+        assert len({c.robust_cfg.label for c in variantes}) == 6
 
 
 def test_replicas_distintas_llevan_semillas_distintas():
@@ -201,17 +204,17 @@ def test_bloque_desconocido_falla():
         build_grid("principal", reps=1)      # bloque retirado
 
 
-def test_sin_ruido_stab_esta_pareado_con_sin_ruido():
+def test_sin_ruido_circafmm_esta_pareado_con_sin_ruido():
     """
     Los dos bloques generan las matrices IDENTICAS y solo cambia
     ``fmm_method``. Sin esto la comparacion seria entre celdas con ruido
     distinto y perderia toda la potencia del diseno pareado.
     """
     a = build_grid("sin_ruido", reps=3)
-    b = build_grid("sin_ruido_stab", reps=3)
+    b = build_grid("sin_ruido_circafmm", reps=3)
     assert len(a) == len(b)
     assert {c.fmm_method for c in a} == {"base"}
-    assert {c.fmm_method for c in b} == {"stabilized"}
+    assert {c.fmm_method for c in b} == {"circafmm"}
 
     def gen(celdas):
         return sorted((c.cfg.n_samples, c.cfg.sampling, c.cfg.omega,

@@ -587,8 +587,21 @@ def _best_step1(
     Estabilidad:  M+A <= max(X) + 1.96 sigma  Y  M-A >= min(X) - 1.96 sigma,
     con  sigma = sqrt(RSS * n / (n - 5))  calculada del RSS (medio) de cada
     candidato, como en el Algoritmo 1 del suplemento de Rueda et al. (2019).
+
+    Los empates se resuelven siempre igual: el RSS se redondea a 9 cifras
+    relativas al menor de la rejilla y se ordena de forma estable, de modo que
+    entre candidatos empatados gana el primero de la rejilla. Con omega = 1 el
+    modelo es un coseno y todos los alpha dan la misma curva, asi que sus RSS
+    son iguales en aritmetica exacta y solo difieren en el ultimo bit
+    (~1e-15). Sin redondear, ese bit dependia del camino de calculo (Numba o
+    NumPy, version de BLAS...) y cambiaba el punto de partida de Nelder-Mead:
+    medido sobre 2000 genes reales, el pico de un 1-2 % de los genes del TOP
+    se movia hasta 0,76 h entre Numba y NumPy. Con el desempate coinciden a
+    menos de 0,003 h.
     """
-    order    = np.argsort(grid_results[:, 5])   # ordenar por RSS
+    rss      = grid_results[:, 5]
+    ref      = np.nanmin(rss[rss > 0]) if np.any(rss > 0) else 1.0
+    order    = np.argsort(np.round(rss / ref, 9), kind="stable")   # empates -> primer punto
     data_min = data.min()
     data_max = data.max()
     n        = len(data)

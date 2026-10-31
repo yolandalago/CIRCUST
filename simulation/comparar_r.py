@@ -82,7 +82,10 @@ def _giro_a_la_verdad(theta_true: np.ndarray, theta_hat: np.ndarray) -> float:
     """
     d = (np.asarray(theta_hat, float) - np.asarray(theta_true, float))
     c, s = np.cos(d).mean(), np.sin(d).mean()
-    return float((np.arctan2(s, c) % TWO_PI) * 24.0 / TWO_PI)
+    # con signo y en (-12, 12]: un desfase de 22,7 h es en realidad de 1,3 h
+    # hacia atras, y en el rango 0 a 24 se leeria como un desastre
+    giro = np.arctan2(s, c) * 24.0 / TWO_PI
+    return float(giro)
 
 
 def contra_la_verdad(raiz: Path) -> pd.DataFrame:
@@ -147,11 +150,9 @@ def entre_implementaciones(raiz: Path) -> pd.DataFrame:
 def resumen(t: pd.DataFrame) -> pd.DataFrame:
     """Mediana por salida de las medidas que van al capitulo."""
     medidas = [c for c in ("error_fase_h", "error_orden_h", "rho_fl",
-                           "p2", "acierto_sentido", "giro_h") if c in t.columns]
+                           "p2", "giro_h") if c in t.columns]
     g = t.groupby("salida")
     salida = g[medidas].median()
-    if "acierto_sentido" in medidas:
-        salida["acierto_sentido"] = g["acierto_sentido"].mean()
     salida["n_celdas"] = g.size()
     return salida
 

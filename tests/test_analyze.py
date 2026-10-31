@@ -40,7 +40,7 @@ def _falso(reps: int = 3) -> pd.DataFrame:
     Rejilla falsa: 2 muestreos x 2 omegas x 2 SNR x 2 FMM x 4 metodos x reps.
 
     Efectos plantados, para que los tests sepan que esperar:
-    - el estabilizado tiene 0,1 menos de RMSE de curva, y la ventaja es el
+    - CircaFMM tiene 0,1 menos de RMSE de curva, y la ventaja es el
       doble con snr 1 que con snr 3
     - la agregacion (tsp3 y hods) tiene 0,1 h menos de error del orden relativo que la
       referencia, medoid 0,05 h menos
@@ -50,9 +50,9 @@ def _falso(reps: int = 3) -> pd.DataFrame:
         for w in (0.1, 0.9):
             for snr in (1.0, 3.0):
                 for rep in range(reps):
-                    for fmm in ("base", "stabilized"):
+                    for fmm in ("base", "circafmm"):
                         for rm, sel, agg, esc in METODOS:
-                            ventaja_fmm = (0.2 if snr == 1.0 else 0.1) if fmm == "stabilized" else 0.0
+                            ventaja_fmm = (0.2 if snr == 1.0 else 0.1) if fmm == "circafmm" else 0.0
                             ventaja_met = {"tsp3": 0.1, "hods": 0.1}.get(agg, 0.0)
                             if sel == "medoid":
                                 ventaja_met = 0.05
@@ -166,7 +166,7 @@ def test_contraste_fmm_es_pareado_y_con_el_metodo_fijo():
 
 def test_contraste_fmm_descarta_las_replicas_con_orientacion_invertida():
     df = _falso()
-    malas = (df.bloque == "rejilla") & (df.fmm_method == "stabilized") & (df.rep == 0)
+    malas = (df.bloque == "rejilla") & (df.fmm_method == "circafmm") & (df.rep == 0)
     df.loc[malas, "acierto_sentido"] = 0.0
     par = contraste_fmm(df)
     assert 0 not in set(par["rep"])
@@ -175,7 +175,7 @@ def test_contraste_fmm_descarta_las_replicas_con_orientacion_invertida():
 
 def test_contraste_fmm_falla_si_las_replicas_no_casan():
     df = _falso()
-    df.loc[df.fmm_method == "stabilized", "rep"] += 50
+    df.loc[df.fmm_method == "circafmm", "rep"] += 50
     with pytest.raises(ValueError, match="no cuadra"):
         contraste_fmm(df)
 
@@ -213,8 +213,8 @@ def test_tabla_atlas_separa_los_dos_metodos_en_niveles():
     assert "fmm_method" in t.index.names
     col = ("atlas_error_onda", "mediana")
     base = t.xs("base", level="fmm_method")[col]
-    stab = t.xs("stabilized", level="fmm_method")[col]
-    assert (stab.values < base.values).all()
+    circa = t.xs("circafmm", level="fmm_method")[col]
+    assert (circa.values < base.values).all()
 
 
 # ── contraste de metodos ───────────────────────────────────────────────────
@@ -232,7 +232,7 @@ def test_contraste_metodos_es_pareado_contra_la_referencia():
 
 def test_contraste_metodos_solo_usa_el_fmm_pedido():
     a = contraste_metodos(_falso(), fmm="base")
-    b = contraste_metodos(_falso(), fmm="stabilized")
+    b = contraste_metodos(_falso(), fmm="circafmm")
     assert len(a) == len(b)
 
 

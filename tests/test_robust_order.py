@@ -90,13 +90,13 @@ def test_fisher_lee_con_una_sola_muestra():
 
 
 # ---------------------------------------------------------------------------
-# Calibracion de lambda del FMM estabilizado
+# Calibracion de lambda de CircaFMM
 # ---------------------------------------------------------------------------
 
 def test_lambda_no_se_recalibra_por_repeticion_por_defecto():
     """
     Recalibrar lambda en cada una de las K repeticiones era el valor por
-    defecto y costaba el 99 % del sobrecoste del FMM estabilizado: 27 s por
+    defecto y costaba el 99 % del sobrecoste de CircaFMM: 27 s por
     calibracion, seis por celda, y el bloque de regularizacion pasaba de 4 a
     20 horas.
 
@@ -193,3 +193,52 @@ def test_corregir_la_orientacion_refleja_tambien_los_parametros_fmm():
         # pico y valle siguen siendo los de los parametros reflejados
         assert f[5] == pytest.approx(FMMModel.peak_time(f[2], f[3], f[4]))
         assert f[6] == pytest.approx(FMMModel.trough_time(f[2], f[3], f[4]))
+
+
+# ---------------------------------------------------------------------------
+# Atlas del tejido (build_atlas)
+# ---------------------------------------------------------------------------
+
+def test_build_atlas_best_k_devuelve_los_parametros_de_la_rep_elegida():
+    """Con best_k no se re-ajusta nada: el atlas es ``selected_fmm`` tal cual."""
+    import pandas as pd
+    from circust.robust_order import build_atlas
+
+    sel = pd.DataFrame({
+        "gene_name": ["G1", "G2"], "r2_fmm": [0.6, 0.9], "M": [0.0, 0.1],
+        "amplitude": [1.0, 2.0], "alpha": [1.0, 4.0], "beta": [3.0, 2.0],
+        "omega": [0.5, 0.8], "peak_phase_rad": [1.2, 4.5],
+        "trough_phase_rad": [4.0, 1.0],
+    })
+    top = pd.DataFrame(np.zeros((2, 5)), index=["G1", "G2"])
+    atlas = build_atlas("best_k", sel, top, np.arange(5), np.linspace(0, 6, 5))
+
+    assert atlas["gene_name"].tolist() == ["G2", "G1"]       # por R2 descendente
+    assert atlas["classification"].tolist() == ["night", "day"]
+    fila = atlas.set_index("gene_name").loc["G1"]
+    assert fila["alpha"] == 1.0 and fila["omega"] == 0.5
+
+
+def test_build_atlas_aggregate_reajusta_sobre_el_orden_de_consenso():
+    """Con aggregate cada gen se re-ajusta sobre ``top_matrix`` reordenada por
+    ``sample_order``, igual que un ajuste FMM directo sobre ese orden."""
+    import pandas as pd
+    from circust.robust_order import build_atlas
+
+    rng   = np.random.default_rng(0)
+    n     = 40
+    fases = np.sort(rng.uniform(0, TWO_PI, n))
+    orden = rng.permutation(n)                  # columna orden[j] tiene fase fases[j]
+    datos = np.empty((2, n))
+    for g, (a, b, w) in enumerate([(1.0, 3.0, 0.4), (4.0, 2.0, 0.8)]):
+        onda = np.cos(b + 2 * np.arctan(w * np.tan((fases - a) / 2)))
+        datos[g, orden] = onda + rng.normal(0, 0.05, n)
+    top = pd.DataFrame(datos, index=["G1", "G2"])
+
+    atlas = build_atlas("aggregate", pd.DataFrame(), top, orden, fases, n_jobs=1)
+    for g in ["G1", "G2"]:
+        directo = FMMModel().fit(top.loc[g].values[orden], fases)
+        fila    = atlas.set_index("gene_name").loc[g]
+        assert fila["r2_fmm"] == pytest.approx(directo.r2)
+        assert fila["alpha"] == pytest.approx(directo.params["alpha"])
+        assert fila["peak_phase_rad"] == pytest.approx(directo.peak_time)

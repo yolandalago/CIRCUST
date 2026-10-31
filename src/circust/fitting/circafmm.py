@@ -1,7 +1,7 @@
 """
-circust/fitting/fmm_stabilized.py
+circust/fitting/circafmm.py
 ==================================
-Modelo FMM estabilizado version mejorada del ajuste FMM.
+CircaFMM (Abston et al., 2026): version mejorada del ajuste FMM.
 
 A diferencia del FMM base (``fmm.py``), este enfoque:
 
@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from scipy.special import i0 as _bessel_i0
+from scipy.special import i0e as _bessel_i0e
 
 from circust.fitting.rhythm_model import FitResult, RhythmModel
 
@@ -111,10 +111,12 @@ def _time_density_weights(
 
         lcv = np.empty(kappa_grid.shape[0])
         for j, k in enumerate(kappa_grid):
-            # K[i,i] = exp(k*1)/(2π·I0) es constante; restamos diagonal del row sum
-            row_sums = np.exp(k * cos_delta).sum(axis=1)
-            diag_val = math.exp(k)                          # cos(0) = 1
-            f_loo = (row_sums - diag_val) / ((n - 1) * 2.0 * math.pi * float(_bessel_i0(k)))
+            # Nucleo escalado: exp(k cos d)/I0(k) = exp(k (cos d - 1))/i0e(k).
+            # Es la misma cantidad, pero ni el numerador ni I0 desbordan con
+            # k grande (exp e i0 dan inf por encima de k ~ 709).
+            # K[i,i] = exp(0)/(2π·i0e) es constante; restamos diagonal del row sum
+            row_sums = np.exp(k * (cos_delta - 1.0)).sum(axis=1)
+            f_loo = (row_sums - 1.0) / ((n - 1) * 2.0 * math.pi * float(_bessel_i0e(k)))
             lcv[j] = np.log(np.maximum(f_loo, eps)).sum()
 
         kappa = float(kappa_grid[int(np.argmax(lcv))])
@@ -123,7 +125,8 @@ def _time_density_weights(
         raise ValueError("kappa debe ser > 0.")
 
     # Densidad final (con todos los puntos, sin LOO)
-    fhat = np.exp(kappa * cos_delta).sum(axis=1) / (n * 2.0 * math.pi * float(_bessel_i0(kappa)))
+    fhat = (np.exp(kappa * (cos_delta - 1.0)).sum(axis=1)
+            / (n * 2.0 * math.pi * float(_bessel_i0e(kappa))))
     return _normalize_weights_to_n(1.0 / np.maximum(fhat, eps))
 
 
@@ -308,7 +311,7 @@ class FMMCache:
 @dataclass
 class FMMPreparedDataset:
     """
-    Bundle completo para ajuste estabilizado.
+    Bundle completo para ajuste con CircaFMM.
 
     Se crea **una sola vez** por dataset (via ``prepare_dataset``) y se
     reutiliza para todos los ajustes posteriores de genes.
@@ -968,7 +971,7 @@ def fit_gene(
     refine:       bool = False,
     refine_steps: int  = 3,
 ) -> FitResult:
-    """Ajuste FMM estabilizado para un gen.
+    """Ajuste CircaFMM para un gen.
 
     Algoritmo:
       1. Calcula ``J(alpha, omega) = P - lambda*g(omega)*R`` para toda la rejilla.
@@ -992,9 +995,13 @@ def fit_gene(
     ``refine_steps`` es el numero ``S`` de pasos de la busqueda de patron. El
     valor por defecto, 3, es el del articulo.
 
-    El ``model_name`` del resultado es ``"fmm_stabilized"`` (vs ``"fmm"`` en el base),
+    El ``model_name`` del resultado es ``"circafmm"`` (vs ``"fmm"`` en el base),
     por si se quiere distinguir mas adelante. Las claves de ``params`` son las
     mismas (M, A, alpha, beta, omega) y la formula de ``peak_time`` es identica.
+
+    El ``r2`` es el ponderado con los pesos de densidad temporal,
+    ``1 - sum(w e^2) / sum(w (x - mean_w(x))^2)``, coherente con la WLS del
+    paso 4. ``sse`` sigue siendo la suma de cuadrados sin pesos.
     """
     data = np.asarray(data, dtype=float)
     if data.shape[0] != prepared.times.shape[0]:
@@ -1057,8 +1064,9 @@ def fit_gene(
     residuals_std = (residuals - residuals.mean()) / res_std if res_std > 0 \
                     else np.zeros_like(residuals)
     sse = float(np.sum(residuals ** 2))
-    ss_tot = float(np.sum((data - data.mean()) ** 2))
-    r2 = float(1.0 - sse / ss_tot) if ss_tot > 0 else 0.0
+    mu_w = float((weights * data).sum() / weights.sum())
+    ss_tot_w = float((weights * (data - mu_w) ** 2).sum())
+    r2 = float(1.0 - (weights * residuals ** 2).sum() / ss_tot_w) if ss_tot_w > 0 else 0.0
 
     peak_t = float(
         (fit["alpha"] + 2.0 * np.arctan2(
@@ -1081,7 +1089,7 @@ def fit_gene(
         residuals     = residuals,
         residuals_std = residuals_std,
         sse           = sse,
-        model_name    = "fmm_stabilized",
+        model_name    = "circafmm",
     )
 
 
@@ -1389,7 +1397,7 @@ def prepare_dataset(
     quantile:          float = 0.975,
     seed:              int   = 1,
 ) -> FMMPreparedDataset:
-    """Preparacion completa del dataset para ajuste estabilizado.
+    """Preparacion completa del dataset para ajuste con CircaFMM.
 
     Llamar UNA SOLA VEZ por dataset. El ``FMMPreparedDataset`` resultante
     se reutiliza para todos los genes posteriores y para cualquier test
@@ -1483,9 +1491,9 @@ def prepare_dataset(
 # Seccion 8 — Clase modelo (interfaz RhythmModel)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class StabilizedFMMModel(RhythmModel):
+class CircaFMMModel(RhythmModel):
     """
-    FMM estabilizado con criterio de potencia + penalizacion de rugosidad.
+    CircaFMM con criterio de potencia + penalizacion de rugosidad.
 
     A diferencia del FMM base (``FMMModel``), este modelo:
 
@@ -1504,14 +1512,14 @@ class StabilizedFMMModel(RhythmModel):
        una vez y lo pasa al constructor::
 
            prepared = prepare_dataset(times)
-           model = StabilizedFMMModel(prepared)
+           model = CircaFMMModel(prepared)
            for gene in genes:
                result = model.fit(data[gene], times)
 
     2. **Lazy (drop-in)**: la clase prepara automaticamente al primer fit
        y cachea el resultado mientras los tiempos no cambien::
 
-           model = StabilizedFMMModel()
+           model = CircaFMMModel()
            for gene in genes:
                result = model.fit(data[gene], times)   # primera prep + cache
 
@@ -1580,7 +1588,7 @@ class StabilizedFMMModel(RhythmModel):
         time_points: np.ndarray,
     ) -> FitResult:
         """
-        Ajusta el FMM estabilizado a ``data``.
+        Ajusta CircaFMM a ``data``.
 
         Si no se ha proporcionado ``prepared`` en el constructor, se prepara
         en la primera llamada y se cachea. Si los ``time_points`` cambian
@@ -1601,27 +1609,27 @@ class StabilizedFMMModel(RhythmModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Factory simple para selector base/estabilizado en el pipeline
+# Factory simple para selector base/CircaFMM en el pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
 def make_fmm_model(method: str = "base", **kwargs) -> RhythmModel:
     """
-    Factory para seleccionar entre FMM base y estabilizado.
+    Factory para seleccionar entre FMM base y CircaFMM.
 
     Parameters
     ----------
     method : str
         - ``"base"``       : retorna ``FMMModel`` (fmm.py, RSS + Nelder-Mead)
-        - ``"stabilized"`` : retorna ``StabilizedFMMModel`` (fmm_stabilized.py)
+        - ``"circafmm"`` : retorna ``CircaFMMModel`` (circafmm.py)
     **kwargs
         Argumentos del constructor del modelo elegido.
     """
     if method == "base":
         from circust.fitting.fmm import FMMModel
         return FMMModel(**kwargs)
-    elif method == "stabilized":
-        return StabilizedFMMModel(**kwargs)
+    elif method == "circafmm":
+        return CircaFMMModel(**kwargs)
     else:
         raise ValueError(
-            f"Unknown fmm_method='{method}'. Use 'base' or 'stabilized'."
+            f"Unknown fmm_method='{method}'. Use 'base' or 'circafmm'."
         )
